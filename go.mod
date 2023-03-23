@@ -1,4 +1,4 @@
-module zombiezen.com/go/markdown
+module zombiezen.com/go/commonmark
 
 go 1.20
 

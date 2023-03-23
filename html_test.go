@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package markdown_test
+package commonmark_test
 
 import (
 	"bytes"
@@ -31,7 +31,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"go4.org/bytereplacer"
 	"golang.org/x/net/html"
-	. "zombiezen.com/go/markdown"
+	. "zombiezen.com/go/commonmark"
 )
 
 var supportedSections = map[string]struct{}{

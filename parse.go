@@ -14,10 +14,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package markdown provides a [CommonMark] parser.
+// Package commonmark provides a [CommonMark] parser.
 //
 // [CommonMark]: https://commonmark.org/
-package markdown
+package commonmark
 
 import (
 	"bytes"
