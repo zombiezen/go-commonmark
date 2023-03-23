@@ -33,10 +33,12 @@ type RootBlock struct {
 
 // A Block is a structural element in a Markdown document.
 type Block struct {
-	kind     BlockKind
-	start    int
-	end      int
-	children []Node
+	kind       BlockKind
+	listDelim  byte // set for [ListKind] and [ListItemKind]
+	listIndent int8
+	start      int
+	end        int
+	children   []Node
 }
 
 func (b *Block) Kind() BlockKind {
@@ -201,6 +203,7 @@ const (
 	SoftLineBreakKind
 	HardLineBreakKind
 	CodeIndentKind
+	ListMarkerKind
 
 	// UnparsedKind is used for inline text that has not been tokenized.
 	UnparsedKind

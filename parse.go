@@ -155,9 +155,17 @@ func descendOpenBlocks(root *RootBlock, line []byte) (container *Block, rest []b
 			// Include entire indent so that we can interpret spacing later.
 			return container, line, false
 		case ParagraphKind:
-			if isBlankLine(line) {
+			if isBlankLine(line[pos:]) {
 				return parent, line, false
 			}
+		case ListKind:
+			// Allow to descend.
+		case ListItemKind:
+			end := parseListItemPrefix(container, line[pos:])
+			if end < 0 {
+				return parent, line, false
+			}
+			line = line[pos+end:]
 		default:
 			panic("unreachable")
 		}
@@ -201,6 +209,26 @@ func openNewBlocks(root *RootBlock, container *Block, allMatched bool, remaining
 		return parent, newChild
 	}
 
+	openListItem := func(pos int, m listMarker) {
+		if containerKind != ListKind || m.delim != container.listDelim {
+			_, newList := addBlock(ListKind, lineStart-remainingStart)
+			if newList == nil {
+				return
+			}
+			newList.listDelim = m.delim
+		}
+		if _, newItem := addBlock(ListItemKind, pos); newItem != nil {
+			newItem.listDelim = m.delim
+			newItem.children = append(newItem.children, (&Inline{
+				kind:  ListMarkerKind,
+				start: pos,
+				end:   m.end,
+			}).AsNode())
+		}
+		remaining = remaining[pos+m.end:]
+		remainingStart += m.end
+	}
+
 	for root.isOpen() &&
 		containerKind != FencedCodeBlockKind &&
 		containerKind != IndentedCodeBlockKind &&
@@ -210,11 +238,17 @@ func openNewBlocks(root *RootBlock, container *Block, allMatched bool, remaining
 			if containerKind == ParagraphKind || isBlankLine(remaining[pos:]) {
 				break
 			}
+			if containerKind == ListKind {
+				if m := parseListMarker(remaining[pos:]); m.end >= 0 {
+					openListItem(pos, m)
+					continue
+				}
+			}
 			addBlock(IndentedCodeBlockKind, 0)
-			continue
+			break
 		} else if end := parseBlockQuote(remaining[pos:]); end >= 0 {
 			addBlock(BlockQuoteKind, pos)
-			remaining = remaining[end:]
+			remaining = remaining[pos+end:]
 			remainingStart += end
 		} else if h := parseATXHeading(remaining[pos:]); h.level != 0 {
 			newBlockParent, newBlock := addBlock(ATXHeadingKind, pos)
@@ -235,6 +269,8 @@ func openNewBlocks(root *RootBlock, container *Block, allMatched bool, remaining
 			}
 			newBlock.end = remainingStart + pos + end
 			return newBlockParent, nil
+		} else if m := parseListMarker(remaining[pos:]); m.end >= 0 {
+			openListItem(pos, m)
 		} else {
 			// Hit the text.
 			break
@@ -306,6 +342,8 @@ func addLineText(root *RootBlock, container *Block, remaining []byte, lineStart,
 				end:   remainingStart + len(remaining),
 			}).AsNode(),
 		)
+	} else if isBlankLine(remaining) {
+		// Ignore.
 	} else if containerKind.acceptsLines() {
 		container.children = append(container.children, (&Inline{
 			kind:  UnparsedKind,
@@ -580,6 +618,66 @@ scanTrailingHashes:
 		}
 	}
 	return h
+}
+
+type listMarker struct {
+	delim byte // one of '-', '+', '*', '.', or ')'
+	end   int  // always delimiter position + 1
+}
+
+// parseListMarker attempts to parse a [list marker] at the beginning of the line.
+// The end is -1 if the line does not begin with a marker.
+// parseListMarker assumes that the caller has stripped any leading indentation.
+//
+// [list marker]: https://spec.commonmark.org/0.30/#list-marker
+func parseListMarker(line []byte) listMarker {
+	if len(line) == 0 {
+		return listMarker{end: -1}
+	}
+	switch c := line[0]; {
+	case c == '-' || c == '+' || c == '*':
+		if !hasTabOrSpacePrefixOrEOL(line[1:]) {
+			return listMarker{end: -1}
+		}
+		return listMarker{delim: line[0], end: 1}
+	case isASCIIDigit(c):
+		// Ordered list. Continue.
+	default:
+		return listMarker{end: -1}
+	}
+	const maxDigits = 9
+	for i := 1; i < maxDigits+1 && i < len(line); i++ {
+		switch c := line[i]; {
+		case isASCIIDigit(c):
+			// Continue.
+		case c == '.' || c == ')':
+			if !hasTabOrSpacePrefixOrEOL(line[i+1:]) {
+				return listMarker{end: -1}
+			}
+			return listMarker{delim: c, end: i + 1}
+		default:
+			return listMarker{end: -1}
+		}
+	}
+	return listMarker{end: -1}
+}
+
+// parseListItemPrefix attempts to parse
+// a sufficient indent to continue the given list item.
+func parseListItemPrefix(item *Block, line []byte) (indent, end int) {
+	consumeIndent(line)
+}
+
+func hasTabOrSpacePrefixOrEOL(line []byte) bool {
+	return len(line) == 0 ||
+		line[0] == ' ' ||
+		line[0] == '\t' ||
+		line[0] == '\n' ||
+		line[0] == '\r'
+}
+
+func isASCIIDigit(c byte) bool {
+	return '0' <= c && c <= '9'
 }
 
 // isEndEscaped reports whether s ends with an odd number of backslashes.
