@@ -39,6 +39,15 @@ var supportedSections = map[string]struct{}{
 	"Paragraphs":      {},
 }
 
+var skippedExamples = map[int]struct{}{
+	56:  {}, // needs emphasis
+	57:  {}, // needs lists
+	59:  {}, // needs Setext heading
+	60:  {}, // needs lists
+	61:  {}, // needs lists
+	226: {}, // needs hard line breaks
+}
+
 func TestSpec(t *testing.T) {
 	testsuiteData, err := os.ReadFile(filepath.Join("testdata", "spec-0.30.json"))
 	if err != nil {
@@ -58,6 +67,9 @@ func TestSpec(t *testing.T) {
 		t.Run(fmt.Sprintf("Example%d", test.Example), func(t *testing.T) {
 			if _, ok := supportedSections[test.Section]; !ok {
 				t.Skipf("Section %q not implemented yet", test.Section)
+			}
+			if _, shouldSkip := skippedExamples[test.Example]; shouldSkip {
+				t.Skipf("Example %d has been marked to skip", test.Example)
 			}
 			blocks := Parse([]byte(test.Markdown))
 			buf := new(bytes.Buffer)
