@@ -25,10 +25,10 @@ import (
 	"io"
 )
 
-const (
-	tabStopSize          = 4
-	codeBlockIndentLimit = 4
-)
+// tabStopSize is the multiple of columns that a [tab] advances to.
+//
+// [tab]: https://spec.commonmark.org/0.30/#tabs
+const tabStopSize = 4
 
 type Parser struct {
 	buf      []byte // current block being parsed
@@ -94,154 +94,114 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 			end: -1,
 		},
 	}
-	lastOpenBlock, rest := openNewBlocks(root, nil, true, line, 0, 0)
+	bp := &blockParser{
+		root:    root,
+		line:    line,
+		opening: true,
+	}
+	openNewBlocks(bp, true)
 	if !root.isOpen() {
 		// Single-line block.
 		root.Source = p.consume()
 		return root, nil
 	}
-	addLineText(root, lastOpenBlock, line, 0, len(line)-len(rest))
+	addLineText(bp)
 
 	// Parse subsequent lines.
 	for {
-		lineStart := p.parsePos
-		line = p.readline()
-		container, rest, allMatched := descendOpenBlocks(root, line)
-		lastOpenBlock, rest := openNewBlocks(root, container, allMatched, rest, lineStart, lineStart+len(line)-len(rest))
-		if lastOpenBlock == nil {
-			if !isBlankLine(rest) {
+		bp.lineStart = p.parsePos
+		bp.line = p.readline()
+		bp.i = 0
+		bp.tabpos = 0
+		bp.opening = false
+
+		allMatched := descendOpenBlocks(bp)
+
+		bp.opening = true
+		openNewBlocks(bp, allMatched)
+		if bp.container == nil {
+			if !isBlankLine(bp.Bytes()) {
 				// If there's remaining text on the line,
 				// then rewind to the beginning of the line.
-				p.parsePos = lineStart
+				p.parsePos = bp.lineStart
 			}
 			root.Source = p.consume()
 			return root, nil
 		}
-		addLineText(root, lastOpenBlock, rest, lineStart, p.parsePos-len(rest))
+		addLineText(bp)
 	}
 }
 
 // descendOpenBlocks iterates through the open blocks,
 // starting at the top-level block,
 // and descending through last children down to the last open block.
-// It returns the last matched block
+// It sets p.container to the last matched block
 // or nil if not even the top-level block could be matched.
 //
 // This corresponds to the first step of [Phase 1]
 // in the CommonMark recommended parsing strategy.
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
-func descendOpenBlocks(root *RootBlock, line []byte) (container *Block, rest []byte, allMatched bool) {
-	var parent *Block
-	container = &root.Block
-
+func descendOpenBlocks(p *blockParser) (allMatched bool) {
+	p.container = nil
+	child := &p.root.Block
 	for {
-		indent, pos := consumeIndent(line)
-
-		switch parserBlockKind(container) {
-		case BlockQuoteKind:
-			if indent >= codeBlockIndentLimit {
-				return parent, line, false
-			}
-			end := parseBlockQuote(line[pos:])
-			if end < 0 {
-				return parent, line, false
-			}
-			line = line[pos+end:]
-		case IndentedCodeBlockKind:
-			if indent < codeBlockIndentLimit {
-				return parent, line, false
-			}
-			// Include entire indent so that we can interpret spacing later.
-			return container, line, false
-		case ParagraphKind:
-			if isBlankLine(line) {
-				return parent, line, false
-			}
-		default:
-			panic("unreachable")
+		rule := blocks[child.Kind()]
+		if rule.match == nil {
+			return false
+		}
+		switch rule.match(p) {
+		case noMatch:
+			return false
+		case matchedEntireLine:
+			p.container = child
+			return false
 		}
 
-		lastChild := container.lastChild().Block()
-		if !lastChild.isOpen() {
-			return container, line, true
+		p.container = child
+		child = child.lastChild().Block()
+		if !child.isOpen() {
+			return true
 		}
-		parent, container = container, lastChild
 	}
 }
 
 // openNewBlocks looks for new block starts,
 // closing any blocks unmatched in step 1
 // before creating new blocks as descendants of the last matched container block.
-// A nil container is interpreted as the document being the last matched container block.
-// openNewBlocks returns the deepest open block and any unprocessed text from the line.
+// openNewBlocks sets p.container to the deepest open block.
 //
 // This corresponds to the second step of [Phase 1]
 // in the CommonMark recommended parsing strategy.
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
-func openNewBlocks(root *RootBlock, container *Block, allMatched bool, remaining []byte, lineStart, remainingStart int) (lastOpenBlock *Block, newRemaining []byte) {
-	if lineStart == remainingStart+len(remaining) {
+func openNewBlocks(p *blockParser, allMatched bool) {
+	if len(p.Bytes()) == 0 {
 		// Special case: EOF. Close the root block.
-		root.close(lineStart)
-		return nil, nil
+		p.root.close(p.lineStart)
+		p.container = nil
+		return
 	}
 
-	containerKind := parserBlockKind(container)
-
-	addBlock := func(kind BlockKind, start int) (parent, newChild *Block) {
-		if container == nil && root.kind != 0 {
-			// Close the root block.
-			root.end = lineStart
-			return nil, nil
+	for p.root.isOpen() &&
+		(p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines) {
+		found := false
+	startsLoop:
+		for _, startFunc := range blockStarts {
+			switch startFunc(p) {
+			case noMatch:
+			case matched:
+				found = true
+				break startsLoop
+			case matchedEntireLine:
+				return
+			}
 		}
-		parent, newChild = appendNewBlock(root, container, kind, lineStart, remainingStart+start)
-		container = newChild
-		containerKind = parserBlockKind(container)
-		return parent, newChild
-	}
-
-	for root.isOpen() &&
-		containerKind != FencedCodeBlockKind &&
-		containerKind != IndentedCodeBlockKind &&
-		containerKind != HTMLBlockKind {
-		indent, pos := consumeIndent(remaining)
-		if indent >= codeBlockIndentLimit {
-			if containerKind == ParagraphKind || isBlankLine(remaining[pos:]) {
-				break
-			}
-			addBlock(IndentedCodeBlockKind, 0)
-			continue
-		} else if end := parseBlockQuote(remaining[pos:]); end >= 0 {
-			addBlock(BlockQuoteKind, pos)
-			remaining = remaining[end:]
-			remainingStart += end
-		} else if h := parseATXHeading(remaining[pos:]); h.level != 0 {
-			newBlockParent, newBlock := addBlock(ATXHeadingKind, pos)
-			if newBlock == nil {
-				return nil, remaining[pos:]
-			}
-			newBlock.end = remainingStart + len(remaining)
-			newBlock.children = append(newBlock.children, (&Inline{
-				kind:  UnparsedKind,
-				start: remainingStart + pos + h.contentStart,
-				end:   remainingStart + pos + h.contentEnd,
-			}).AsNode())
-			return newBlockParent, nil
-		} else if end := parseThematicBreak(remaining[pos:]); end >= 0 && !(containerKind == ParagraphKind && !allMatched) {
-			newBlockParent, newBlock := addBlock(ThematicBreakKind, pos)
-			if newBlock == nil {
-				return nil, remaining[pos:]
-			}
-			newBlock.end = remainingStart + pos + end
-			return newBlockParent, nil
-		} else {
+		if !found {
 			// Hit the text.
 			break
 		}
 	}
-
-	return container, remaining
 }
 
 // appendNewBlock creates a new block and appends it to the tree,
@@ -254,11 +214,11 @@ func openNewBlocks(root *RootBlock, container *Block, allMatched bool, remaining
 func appendNewBlock(root *RootBlock, parent *Block, kind BlockKind, lineStart, start int) (actualParent, newNode *Block) {
 	// Move up the tree until we find a block that can handle the new child.
 	for {
-		parentKind := parserBlockKind(parent)
-		if parent == nil {
-			parentKind = documentKind
+		parentKind := documentKind
+		if parent != nil {
+			parentKind = parent.kind
 		}
-		if parentKind.canContain(kind) {
+		if rule := blocks[parentKind]; rule.canContain != nil && rule.canContain(kind) {
 			break
 		}
 		parent.close(lineStart)
@@ -290,47 +250,33 @@ func appendNewBlock(root *RootBlock, parent *Block, kind BlockKind, lineStart, s
 	return parent, newChild
 }
 
-func addLineText(root *RootBlock, container *Block, remaining []byte, lineStart, remainingStart int) {
-	containerKind := parserBlockKind(container)
-	if containerKind == FencedCodeBlockKind || containerKind == IndentedCodeBlockKind {
-		_, indentEnd := consumeIndent(remaining)
-		container.children = append(container.children,
-			(&Inline{
-				kind:  CodeIndentKind,
-				start: remainingStart,
-				end:   remainingStart + indentEnd,
-			}).AsNode(),
-			(&Inline{
-				kind:  UnparsedKind,
-				start: remainingStart + indentEnd,
-				end:   remainingStart + len(remaining),
-			}).AsNode(),
-		)
-	} else if containerKind.acceptsLines() {
-		container.children = append(container.children, (&Inline{
+func addLineText(p *blockParser) {
+	if blocks[p.ContainerKind()].acceptsLines {
+		if indent := p.Indent(); indent > 0 {
+			start := p.lineStart + p.i
+			p.ConsumeIndent(indent)
+			p.container.children = append(p.container.children, (&Inline{
+				kind:   IndentKind,
+				indent: indent,
+				start:  start,
+				end:    p.lineStart + p.i,
+			}).AsNode())
+		}
+		p.container.children = append(p.container.children, (&Inline{
 			kind:  UnparsedKind,
-			start: remainingStart,
-			end:   remainingStart + len(remaining),
+			start: p.lineStart + p.i,
+			end:   p.lineStart + len(p.line),
 		}).AsNode())
-	} else {
+	} else if !isBlankLine(p.Bytes()) {
 		// Create paragraph container for line.
-		_, p := appendNewBlock(root, container, ParagraphKind, lineStart, remainingStart)
-		p.children = append(p.children, (&Inline{
+		_, para := appendNewBlock(p.root, p.container, ParagraphKind, p.lineStart, p.lineStart+p.i)
+		p.ConsumeIndent(p.Indent())
+		para.children = append(para.children, (&Inline{
 			kind:  UnparsedKind,
-			start: remainingStart,
-			end:   remainingStart + len(remaining),
+			start: p.lineStart + p.i,
+			end:   p.lineStart + len(p.line),
 		}).AsNode())
 	}
-}
-
-// parserBlockKind is similar to [*Block.Kind]
-// but returns documentKind for nil
-// to accomodate the pattern of using a nil parent to represent the document.
-func parserBlockKind(b *Block) BlockKind {
-	if b == nil {
-		return documentKind
-	}
-	return b.kind
 }
 
 func findParent(root *RootBlock, b *Block) *Block {
@@ -424,17 +370,8 @@ func (p *Parser) consume() []byte {
 	return out
 }
 
-func consumeIndent(line []byte) (indent, nbytes int) {
-	for ; nbytes < len(line); nbytes++ {
-		if line[nbytes] == ' ' {
-			indent++
-		} else if line[nbytes] == '\t' {
-			indent += tabStopSize
-		} else {
-			break
-		}
-	}
-	return
+func trimIndent(line []byte) []byte {
+	return bytes.TrimLeft(line, " \t")
 }
 
 func isBlankLine(line []byte) bool {
@@ -444,142 +381,6 @@ func isBlankLine(line []byte) bool {
 		}
 	}
 	return true
-}
-
-// parseThematicBreak attempts to parse the line as a [thematic break].
-// It returns the end of the thematic break characters
-// or -1 if the line is not a thematic break.
-// parseThematicBreak assumes that the caller has stripped any leading indentation.
-//
-// [thematic break]: https://spec.commonmark.org/0.30/#thematic-breaks
-func parseThematicBreak(line []byte) (end int) {
-	const chars = "-_*"
-	n := 0
-	var want byte
-	for i, b := range line {
-		switch b {
-		case '-', '_', '*':
-			if n == 0 {
-				want = b
-			} else if b != want {
-				return -1
-			}
-			n++
-			end = i + 1
-		case ' ', '\t', '\r', '\n':
-			// Ignore
-		default:
-			return -1
-		}
-	}
-	if n < 3 {
-		return -1
-	}
-	return end
-}
-
-// parseBlockQuote attempts to parse a [block quote marker] from the beginning of the line.
-// It returns the end of the block quote marker
-// or -1 if the line does not begin with the marker.
-// parseBlockQuote assumes that the caller has stripped any leading indentation.
-//
-// [block quote marker]: https://spec.commonmark.org/0.30/#block-quote-marker
-func parseBlockQuote(line []byte) (end int) {
-	if len(line) == 0 || line[0] != '>' {
-		return -1
-	}
-	if len(line) > 1 && line[1] == ' ' {
-		return 2
-	}
-	return 1
-}
-
-type atxHeading struct {
-	level        int // 1-6
-	contentStart int
-	contentEnd   int
-}
-
-// parseATXHeading attempts to parse the line as an [ATX heading].
-// The level is zero if the line is not an ATX heading.
-// parseATXHeading assumes that the caller has stripped any leading indentation.
-//
-// [ATX heading]: https://spec.commonmark.org/0.30/#atx-headings
-func parseATXHeading(line []byte) atxHeading {
-	var h atxHeading
-	for h.level < len(line) && line[h.level] == '#' {
-		h.level++
-	}
-	if h.level == 0 || h.level > 6 {
-		return atxHeading{}
-	}
-
-	// Consume required whitespace before heading.
-	i := h.level
-	if i >= len(line) || line[i] == '\n' || line[i] == '\r' {
-		h.contentStart = i
-		h.contentEnd = i
-		return h
-	}
-	if !(line[i] == ' ' || line[i] == '\t') {
-		return atxHeading{}
-	}
-	i++
-
-	// Advance past leading whitespace.
-	for i < len(line) && line[i] == ' ' || line[i] == '\t' {
-		i++
-	}
-	h.contentStart = i
-
-	// Find end of heading line. Skip past trailing spaces.
-	h.contentEnd = len(line)
-	hitHash := false
-scanBack:
-	for ; h.contentEnd > h.contentStart; h.contentEnd-- {
-		switch line[h.contentEnd-1] {
-		case '\r', '\n':
-			// Skip past EOL.
-		case ' ', '\t':
-			if isEndEscaped(line[:h.contentEnd-1]) {
-				break scanBack
-			}
-		case '#':
-			hitHash = true
-			break scanBack
-		default:
-			break scanBack
-		}
-	}
-	if !hitHash {
-		return h
-	}
-
-	// We've encountered one hashmark '#'.
-	// Consume all of them, unless they are preceded by a space or tab.
-scanTrailingHashes:
-	for i := h.contentEnd - 1; ; i-- {
-		if i <= h.contentStart {
-			h.contentEnd = h.contentStart
-			break
-		}
-		switch line[i] {
-		case '#':
-			// Keep going.
-		case ' ', '\t':
-			h.contentEnd = i + 1
-			break scanTrailingHashes
-		default:
-			return h
-		}
-	}
-	// We've hit the end of hashmarks. Trim trailing whitespace.
-	for ; h.contentEnd > h.contentStart; h.contentEnd-- {
-		if b := line[h.contentEnd-1]; !(b == ' ' || b == '\t') || isEndEscaped(line[:h.contentEnd-1]) {
-			break
-		}
-	}
-	return h
 }
 
 // isEndEscaped reports whether s ends with an odd number of backslashes.
