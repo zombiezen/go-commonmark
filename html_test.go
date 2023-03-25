@@ -37,15 +37,19 @@ import (
 var supportedSections = map[string]struct{}{
 	"Thematic breaks": {},
 	"Paragraphs":      {},
+	"ATX headings":    {},
 }
 
-var skippedExamples = map[int]struct{}{
-	56:  {}, // needs emphasis
-	57:  {}, // needs lists
-	59:  {}, // needs Setext heading
-	60:  {}, // needs lists
-	61:  {}, // needs lists
-	226: {}, // needs hard line breaks
+var skippedExamples = map[int]string{
+	56:  "emphasis not implemented",
+	57:  "lists not implemented",
+	59:  "setext headings not implemented",
+	60:  "lists not implemented",
+	61:  "lists not implemented",
+	65:  "uses inline backslash escapes",
+	66:  "emphasis not implemented",
+	76:  "uses inline backslash escapes",
+	226: "needs hard line breaks",
 }
 
 func TestSpec(t *testing.T) {
@@ -68,8 +72,8 @@ func TestSpec(t *testing.T) {
 			if _, ok := supportedSections[test.Section]; !ok {
 				t.Skipf("Section %q not implemented yet", test.Section)
 			}
-			if _, shouldSkip := skippedExamples[test.Example]; shouldSkip {
-				t.Skipf("Example %d has been marked to skip", test.Example)
+			if skipReason := skippedExamples[test.Example]; skipReason != "" {
+				t.Skip("Skipped:", skipReason)
 			}
 			blocks := Parse([]byte(test.Markdown))
 			buf := new(bytes.Buffer)

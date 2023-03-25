@@ -152,9 +152,6 @@ func (bp *blockParser) Bytes() []byte {
 // Advance advances the parser by n bytes.
 // It panics if n is greater than the number of bytes remaining in the line.
 func (bp *blockParser) Advance(n int) {
-	if bp.container == nil && !bp.root.isOpen() || !bp.container.isOpen() {
-		return
-	}
 	newIndex := bp.i + n
 	if newIndex > len(bp.line) {
 		panic("index out of bounds")
@@ -194,9 +191,6 @@ func (bp *blockParser) Indent() int {
 // ConsumeIndent advances the parser by n columns of whitespace.
 // It panics if n is greater than bp.Indent().
 func (bp *blockParser) ConsumeIndent(n int) {
-	if bp.container == nil && !bp.root.isOpen() || !bp.container.isOpen() {
-		return
-	}
 	for n > 0 {
 		switch {
 		case bp.i < len(bp.line) && bp.line[bp.i] == ' ':
@@ -236,10 +230,28 @@ func (bp *blockParser) OpenBlock(kind BlockKind) {
 	_, bp.container = appendNewBlock(bp.root, bp.container, kind, bp.lineStart, bp.lineStart+bp.i)
 }
 
+// CollectInline adds a new [UnparsedKind] inline to the current block,
+// starting at the current position and ending after n bytes.
+func (bp *blockParser) CollectInline(n int) {
+	if !bp.opening {
+		panic("CollectInline cannot be called in this context")
+	}
+	start := bp.lineStart + bp.i
+	bp.Advance(n)
+	if bp.container == nil {
+		return
+	}
+	bp.container.children = append(bp.container.children, (&Inline{
+		kind:  UnparsedKind,
+		start: start,
+		end:   bp.lineStart + bp.i,
+	}).AsNode())
+}
+
 // EndBlock ends a block at the current position.
 func (bp *blockParser) EndBlock() {
 	if !bp.opening {
-		panic("OpenBlock cannot be called in this context")
+		panic("EndBlock cannot be called in this context")
 	}
 	if bp.container == nil {
 		if bp.root.end < 0 {
@@ -280,6 +292,26 @@ var blockStarts = []func(*blockParser) parseResult{
 		p.EndBlock()
 		return matched
 	},
+
+	// ATX heading.
+	func(p *blockParser) parseResult {
+		indent := p.Indent()
+		if indent >= codeBlockIndentLimit {
+			return noMatch
+		}
+		h := parseATXHeading(trimIndent(p.Bytes()))
+		if h.level < 1 {
+			return noMatch
+		}
+		p.ConsumeIndent(indent)
+		p.OpenBlock(ATXHeadingKind)
+		p.Advance(h.contentStart)
+		p.CollectInline(h.contentEnd - h.contentStart)
+		p.Advance(len(p.Bytes()))
+		p.EndBlock()
+		return matchedEntireLine
+	},
+
 	// Thematic break.
 	func(p *blockParser) parseResult {
 		indent := p.Indent()

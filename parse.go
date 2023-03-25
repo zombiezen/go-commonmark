@@ -120,11 +120,7 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 		bp.opening = true
 		openNewBlocks(bp, allMatched)
 		if bp.container == nil {
-			if !isBlankLine(bp.Bytes()) {
-				// If there's remaining text on the line,
-				// then rewind to the beginning of the line.
-				p.parsePos = bp.lineStart
-			}
+			p.parsePos = root.end
 			root.Source = p.consume()
 			return root, nil
 		}
@@ -182,6 +178,16 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 		p.container = nil
 		return
 	}
+
+	defer func() {
+		if !allMatched {
+			if p.container == nil {
+				p.root.close(p.lineStart)
+			} else {
+				p.container.lastChild().Block().close(p.lineStart)
+			}
+		}
+	}()
 
 	for p.root.isOpen() &&
 		(p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines) {
