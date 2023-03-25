@@ -145,37 +145,37 @@ type blockParser struct {
 }
 
 // Bytes returns the bytes remaining in the line.
-func (bp *blockParser) Bytes() []byte {
-	return bp.line[bp.i:]
+func (p *blockParser) Bytes() []byte {
+	return p.line[p.i:]
 }
 
 // Advance advances the parser by n bytes.
 // It panics if n is greater than the number of bytes remaining in the line.
-func (bp *blockParser) Advance(n int) {
-	newIndex := bp.i + n
-	if newIndex > len(bp.line) {
+func (p *blockParser) Advance(n int) {
+	newIndex := p.i + n
+	if newIndex > len(p.line) {
 		panic("index out of bounds")
 	}
-	bp.i = newIndex
-	bp.tabpos = 0
+	p.i = newIndex
+	p.tabpos = 0
 }
 
 // Indent returns the number of columns of whitespace
 // present after the cursor's position.
-func (bp *blockParser) Indent() int {
-	if bp.i >= len(bp.line) {
+func (p *blockParser) Indent() int {
+	if p.i >= len(p.line) {
 		return 0
 	}
 	var indent int
-	switch bp.line[bp.i] {
+	switch p.line[p.i] {
 	case ' ':
 		indent = 1
 	case '\t':
-		indent = tabStopSize - int(bp.tabpos)
+		indent = tabStopSize - int(p.tabpos)
 	default:
 		return 0
 	}
-	for _, c := range bp.line[bp.i+1:] {
+	for _, c := range p.line[p.i+1:] {
 		switch c {
 		case ' ':
 			indent++
@@ -190,20 +190,20 @@ func (bp *blockParser) Indent() int {
 
 // ConsumeIndent advances the parser by n columns of whitespace.
 // It panics if n is greater than bp.Indent().
-func (bp *blockParser) ConsumeIndent(n int) {
+func (p *blockParser) ConsumeIndent(n int) {
 	for n > 0 {
 		switch {
-		case bp.i < len(bp.line) && bp.line[bp.i] == ' ':
+		case p.i < len(p.line) && p.line[p.i] == ' ':
 			n--
-			bp.i++
-		case bp.i < len(bp.line) && bp.line[bp.i] == '\t':
-			if n < tabStopSize-int(bp.tabpos) {
-				bp.tabpos += int8(n)
+			p.i++
+		case p.i < len(p.line) && p.line[p.i] == '\t':
+			if n < tabStopSize-int(p.tabpos) {
+				p.tabpos += int8(n)
 				return
 			}
-			n -= tabStopSize - int(bp.tabpos)
-			bp.i++
-			bp.tabpos = 0
+			n -= tabStopSize - int(p.tabpos)
+			p.i++
+			p.tabpos = 0
 		default:
 			panic("consumed past end of indent")
 		}
@@ -213,16 +213,16 @@ func (bp *blockParser) ConsumeIndent(n int) {
 // ContainerKind returns the kind of the current block.
 // During block start checks, this will be the parent of block being considered.
 // During [blockRule] matches, this will be the same as the rule's kind.
-func (bp *blockParser) ContainerKind() BlockKind {
-	if bp.container == nil {
+func (p *blockParser) ContainerKind() BlockKind {
+	if p.container == nil {
 		return documentKind
 	}
-	return bp.container.kind
+	return p.container.kind
 }
 
 // TipKind returns the kind of the deepest open block.
-func (bp *blockParser) TipKind() BlockKind {
-	tip := findTip(&bp.root.Block)
+func (p *blockParser) TipKind() BlockKind {
+	tip := findTip(&p.root.Block)
 	if tip == nil {
 		return documentKind
 	}
@@ -230,77 +230,77 @@ func (bp *blockParser) TipKind() BlockKind {
 }
 
 // OpenBlock starts a new block at the current position.
-func (bp *blockParser) OpenBlock(kind BlockKind) {
-	if !bp.opening {
+func (p *blockParser) OpenBlock(kind BlockKind) {
+	if !p.opening {
 		panic("OpenBlock cannot be called in this context")
 	}
 
 	// Move up the tree until we find a block that can handle the new child.
 	for {
-		if rule := blocks[bp.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
+		if rule := blocks[p.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
 			break
 		}
-		bp.container.close(bp.lineStart)
-		if bp.container == nil {
+		p.container.close(p.lineStart)
+		if p.container == nil {
 			return
 		}
-		bp.container = findParent(bp.root, bp.container)
+		p.container = findParent(p.root, p.container)
 	}
 
 	// Special case: parent is the document.
-	if bp.container == nil {
-		if bp.root.kind != 0 {
+	if p.container == nil {
+		if p.root.kind != 0 {
 			// Attempting to open a new root block.
-			bp.root.close(bp.lineStart)
+			p.root.close(p.lineStart)
 			return
 		}
-		bp.root.kind = kind
-		bp.root.start = bp.lineStart + bp.i
-		bp.root.end = -1
-		bp.container = &bp.root.Block
+		p.root.kind = kind
+		p.root.start = p.lineStart + p.i
+		p.root.end = -1
+		p.container = &p.root.Block
 		return
 	}
 
 	// Normal case: append to the parent's children list.
-	bp.container.lastChild().Block().close(bp.lineStart)
+	p.container.lastChild().Block().close(p.lineStart)
 	newChild := &Block{
 		kind:  kind,
-		start: bp.lineStart + bp.i,
+		start: p.lineStart + p.i,
 		end:   -1,
 	}
-	bp.container.children = append(bp.container.children, newChild.AsNode())
-	bp.container = newChild
+	p.container.children = append(p.container.children, newChild.AsNode())
+	p.container = newChild
 }
 
 // CollectInline adds a new [UnparsedKind] inline to the current block,
 // starting at the current position and ending after n bytes.
-func (bp *blockParser) CollectInline(n int) {
-	if !bp.opening {
+func (p *blockParser) CollectInline(n int) {
+	if !p.opening {
 		panic("CollectInline cannot be called in this context")
 	}
-	start := bp.lineStart + bp.i
-	bp.Advance(n)
-	if bp.container == nil {
+	start := p.lineStart + p.i
+	p.Advance(n)
+	if p.container == nil {
 		return
 	}
-	bp.container.children = append(bp.container.children, (&Inline{
+	p.container.children = append(p.container.children, (&Inline{
 		kind:  UnparsedKind,
 		start: start,
-		end:   bp.lineStart + bp.i,
+		end:   p.lineStart + p.i,
 	}).AsNode())
 }
 
 // EndBlock ends a block at the current position.
-func (bp *blockParser) EndBlock() {
-	if !bp.opening {
+func (p *blockParser) EndBlock() {
+	if !p.opening {
 		panic("EndBlock cannot be called in this context")
 	}
-	if bp.container == nil {
-		bp.root.close(bp.lineStart + bp.i)
+	if p.container == nil {
+		p.root.close(p.lineStart + p.i)
 		return
 	}
-	bp.container.close(bp.lineStart + bp.i)
-	bp.container = findParent(bp.root, bp.container)
+	p.container.close(p.lineStart + p.i)
+	p.container = findParent(p.root, p.container)
 }
 
 type parseResult int8
