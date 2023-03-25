@@ -14,6 +14,7 @@
     {
       devShells.default = pkgs.mkShell {
         packages = [
+          inputs.nixpkgs.legacyPackages.${system}.go-tools
           inputs.nixpkgs.legacyPackages.${system}.go_1_20
         ];
       };
