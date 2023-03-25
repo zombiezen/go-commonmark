@@ -210,11 +210,23 @@ func (bp *blockParser) ConsumeIndent(n int) {
 	}
 }
 
+// ContainerKind returns the kind of the current block.
+// During block start checks, this will be the parent of block being considered.
+// During [blockRule] matches, this will be the same as the rule's kind.
 func (bp *blockParser) ContainerKind() BlockKind {
 	if bp.container == nil {
 		return documentKind
 	}
 	return bp.container.kind
+}
+
+// TipKind returns the kind of the deepest open block.
+func (bp *blockParser) TipKind() BlockKind {
+	tip := findTip(&bp.root.Block)
+	if tip == nil {
+		return documentKind
+	}
+	return tip.kind
 }
 
 // OpenBlock starts a new block at the current position.
@@ -289,7 +301,6 @@ var blockStarts = []func(*blockParser) parseResult{
 		p.ConsumeIndent(indent)
 		p.OpenBlock(BlockQuoteKind)
 		p.Advance(end)
-		p.EndBlock()
 		return matched
 	},
 
@@ -330,11 +341,7 @@ var blockStarts = []func(*blockParser) parseResult{
 	},
 	// Indented code block.
 	func(p *blockParser) parseResult {
-		if p.ContainerKind() == ParagraphKind {
-			return noMatch
-		}
-		indent := p.Indent()
-		if indent < codeBlockIndentLimit || isBlankLine(p.Bytes()) {
+		if p.Indent() < codeBlockIndentLimit || isBlankLine(p.Bytes()) || p.TipKind() == ParagraphKind {
 			return noMatch
 		}
 		p.ConsumeIndent(codeBlockIndentLimit)

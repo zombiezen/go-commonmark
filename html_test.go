@@ -38,6 +38,7 @@ var supportedSections = map[string]struct{}{
 	"Thematic breaks": {},
 	"Paragraphs":      {},
 	"ATX headings":    {},
+	"Block quotes":    {},
 }
 
 var skippedExamples = map[int]string{
@@ -50,6 +51,8 @@ var skippedExamples = map[int]string{
 	66:  "emphasis not implemented",
 	76:  "uses inline backslash escapes",
 	226: "needs hard line breaks",
+	235: "lists not implemented",
+	237: "fenced code blocks not implemented",
 }
 
 func TestSpec(t *testing.T) {

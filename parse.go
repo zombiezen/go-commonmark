@@ -179,15 +179,30 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 		return
 	}
 
-	defer func() {
-		if !allMatched {
+	// If we didn't match everything in [descendOpenBlocks],
+	// we may need to close descendants if no new blocks were created.
+	// (Creating a new block automatically closes prior open children.)
+	if !allMatched {
+		defer func() {
+			// Special case: [paragraph continuation text].
+			// Rather than closing the unmatched paragraph,
+			// move the container pointer to it.
+			//
+			// [paragraph continuation text]: https://spec.commonmark.org/0.30/#paragraph-continuation-text
+			if !isBlankLine(p.Bytes()) {
+				if tip := findTip(&p.root.Block); tip.Kind() == ParagraphKind {
+					p.container = tip
+					return
+				}
+			}
+
 			if p.container == nil {
 				p.root.close(p.lineStart)
 			} else {
 				p.container.lastChild().Block().close(p.lineStart)
 			}
-		}
-	}()
+		}()
+	}
 
 	for p.root.isOpen() &&
 		(p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines) {
@@ -296,6 +311,15 @@ func findParent(root *RootBlock, b *Block) *Block {
 		parent = curr
 		curr = curr.lastChild().Block()
 	}
+}
+
+// findTip finds the deepest open descendant of b.
+func findTip(b *Block) *Block {
+	var parent *Block
+	for b.isOpen() {
+		parent, b = b, b.lastChild().Block()
+	}
+	return parent
 }
 
 // readline reads the next line of input, growing p.buf as necessary.
