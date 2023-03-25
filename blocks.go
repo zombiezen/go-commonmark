@@ -234,12 +234,42 @@ func (bp *blockParser) OpenBlock(kind BlockKind) {
 	if !bp.opening {
 		panic("OpenBlock cannot be called in this context")
 	}
-	if bp.container == nil && bp.root.kind != 0 {
-		// Close the root block.
-		bp.root.end = bp.lineStart
+
+	// Move up the tree until we find a block that can handle the new child.
+	for {
+		if rule := blocks[bp.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
+			break
+		}
+		bp.container.close(bp.lineStart)
+		if bp.container == nil {
+			return
+		}
+		bp.container = findParent(bp.root, bp.container)
+	}
+
+	// Special case: parent is the document.
+	if bp.container == nil {
+		if bp.root.kind != 0 {
+			// Attempting to open a new root block.
+			bp.root.close(bp.lineStart)
+			return
+		}
+		bp.root.kind = kind
+		bp.root.start = bp.lineStart + bp.i
+		bp.root.end = -1
+		bp.container = &bp.root.Block
 		return
 	}
-	_, bp.container = appendNewBlock(bp.root, bp.container, kind, bp.lineStart, bp.lineStart+bp.i)
+
+	// Normal case: append to the parent's children list.
+	bp.container.lastChild().Block().close(bp.lineStart)
+	newChild := &Block{
+		kind:  kind,
+		start: bp.lineStart + bp.i,
+		end:   -1,
+	}
+	bp.container.children = append(bp.container.children, newChild.AsNode())
+	bp.container = newChild
 }
 
 // CollectInline adds a new [UnparsedKind] inline to the current block,
@@ -266,9 +296,7 @@ func (bp *blockParser) EndBlock() {
 		panic("EndBlock cannot be called in this context")
 	}
 	if bp.container == nil {
-		if bp.root.end < 0 {
-			bp.root.close(bp.lineStart + bp.i)
-		}
+		bp.root.close(bp.lineStart + bp.i)
 		return
 	}
 	bp.container.close(bp.lineStart + bp.i)

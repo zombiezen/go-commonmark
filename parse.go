@@ -225,54 +225,9 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 	}
 }
 
-// appendNewBlock creates a new block and appends it to the tree,
-// preferring insertion at the given parent block.
-// The parent block is assumed to be open; the results are undefined if it is closed.
-// If the parent block can't contain a block of the given kind,
-// it will be closed and appendNewBlock will look up the tree
-// to find a block that supports the new block kind.
-// newNode will be nil if and only if appendNewBlock could not find a suitable parent.
-func appendNewBlock(root *RootBlock, parent *Block, kind BlockKind, lineStart, start int) (actualParent, newNode *Block) {
-	// Move up the tree until we find a block that can handle the new child.
-	for {
-		parentKind := documentKind
-		if parent != nil {
-			parentKind = parent.kind
-		}
-		if rule := blocks[parentKind]; rule.canContain != nil && rule.canContain(kind) {
-			break
-		}
-		parent.close(lineStart)
-		if parent == nil {
-			return nil, nil
-		}
-		parent = findParent(root, parent)
-	}
-
-	// Special case: parent is the document.
-	if parent == nil {
-		if root.kind != 0 {
-			return nil, nil
-		}
-		root.kind = kind
-		root.start = start
-		root.end = -1
-		return nil, &root.Block
-	}
-
-	// Normal case: append to the parent's children list.
-	parent.lastChild().Block().close(lineStart)
-	newChild := &Block{
-		kind:  kind,
-		start: start,
-		end:   -1,
-	}
-	parent.children = append(parent.children, newChild.AsNode())
-	return parent, newChild
-}
-
 func addLineText(p *blockParser) {
-	if blocks[p.ContainerKind()].acceptsLines {
+	switch {
+	case blocks[p.ContainerKind()].acceptsLines:
 		if indent := p.Indent(); indent > 0 {
 			start := p.lineStart + p.i
 			p.ConsumeIndent(indent)
@@ -283,21 +238,19 @@ func addLineText(p *blockParser) {
 				end:    p.lineStart + p.i,
 			}).AsNode())
 		}
-		p.container.children = append(p.container.children, (&Inline{
-			kind:  UnparsedKind,
-			start: p.lineStart + p.i,
-			end:   p.lineStart + len(p.line),
-		}).AsNode())
-	} else if !isBlankLine(p.Bytes()) {
+	case !isBlankLine(p.Bytes()):
 		// Create paragraph container for line.
-		_, para := appendNewBlock(p.root, p.container, ParagraphKind, p.lineStart, p.lineStart+p.i)
+		p.OpenBlock(ParagraphKind)
 		p.ConsumeIndent(p.Indent())
-		para.children = append(para.children, (&Inline{
-			kind:  UnparsedKind,
-			start: p.lineStart + p.i,
-			end:   p.lineStart + len(p.line),
-		}).AsNode())
+	default:
+		return
 	}
+
+	p.container.children = append(p.container.children, (&Inline{
+		kind:  UnparsedKind,
+		start: p.lineStart + p.i,
+		end:   p.lineStart + len(p.line),
+	}).AsNode())
 }
 
 func findParent(root *RootBlock, b *Block) *Block {
