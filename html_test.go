@@ -35,6 +35,7 @@ import (
 )
 
 var supportedSections = map[string]struct{}{
+	"Tabs":            {},
 	"Thematic breaks": {},
 	"Paragraphs":      {},
 	"ATX headings":    {},
@@ -43,6 +44,10 @@ var supportedSections = map[string]struct{}{
 }
 
 var skippedExamples = map[int]string{
+	4:   "list continuation lines buggy",
+	5:   "list continuation lines buggy",
+	7:   "list padding buggy",
+	9:   "list indentation buggy",
 	56:  "emphasis not implemented",
 	57:  "lists not implemented",
 	59:  "setext headings not implemented",

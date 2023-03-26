@@ -115,6 +115,10 @@ func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 		dst = append(dst, '\n')
 	case HardLineBreakKind:
 		dst = append(dst, "<br>\n"...)
+	case IndentKind:
+		for i, n := 0, inline.IndentWidth(); i < n; i++ {
+			dst = append(dst, " "...)
+		}
 	}
 	return dst
 }

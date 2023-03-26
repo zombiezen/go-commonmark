@@ -95,12 +95,7 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 			end: -1,
 		},
 	}
-	bp := &blockParser{
-		root:           root,
-		line:           line,
-		opening:        true,
-		listItemIndent: math.MaxInt,
-	}
+	bp := newBlockParser(root, line)
 	openNewBlocks(bp, true)
 	if !root.isOpen() {
 		// Single-line block.
@@ -111,11 +106,8 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 
 	// Parse subsequent lines.
 	for {
-		bp.lineStart = p.parsePos
-		bp.line = p.readline()
-		bp.i = 0
-		bp.tabpos = 0
-		bp.opening = false
+		lineStart := p.parsePos
+		bp.reset(lineStart, p.readline())
 
 		allMatched := descendOpenBlocks(bp)
 
@@ -151,13 +143,9 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 		if child.Kind() == ListItemKind {
 			p.listItemIndent = child.listItemIndent
 		}
-		result := rule.match(p)
+		ok := rule.match(p)
 		p.listItemIndent = math.MaxInt
-		switch result {
-		case noMatch:
-			return false
-		case matchedEntireLine:
-			p.container = child
+		if !ok {
 			return false
 		}
 
@@ -179,7 +167,7 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
 func openNewBlocks(p *blockParser, allMatched bool) {
-	if len(p.Bytes()) == 0 {
+	if len(p.line) == 0 {
 		// Special case: EOF. Close the root block.
 		p.root.close(p.root.Source, p.lineStart)
 		p.container = nil
@@ -196,7 +184,7 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 			// move the container pointer to it.
 			//
 			// [paragraph continuation text]: https://spec.commonmark.org/0.30/#paragraph-continuation-text
-			if !isBlankLine(p.Bytes()) {
+			if !p.IsRestBlank() {
 				if tip := findTip(&p.root.Block); tip.Kind() == ParagraphKind {
 					p.container = tip
 					return
@@ -214,15 +202,10 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 	for p.root.isOpen() &&
 		(p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines) {
 		found := false
-	startsLoop:
 		for _, startFunc := range blockStarts {
-			switch startFunc(p) {
-			case noMatch:
-			case matched:
+			if startFunc(p) {
 				found = true
-				break startsLoop
-			case matchedEntireLine:
-				return
+				break
 			}
 		}
 		if !found {
@@ -233,7 +216,7 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 }
 
 func addLineText(p *blockParser) {
-	isBlank := isBlankLine(p.Bytes())
+	isBlank := p.IsRestBlank()
 	if lastChild := p.container.lastChild().Block(); lastChild != nil && isBlank {
 		lastChild.lastLineBlank = true
 	}
@@ -375,8 +358,30 @@ func (p *Parser) consume() []byte {
 	return out
 }
 
-func trimIndent(line []byte) []byte {
-	return bytes.TrimLeft(line, " \t")
+// columnWidth returns the width of the given text in columns
+// given the 0-based column starting position.
+func columnWidth(start int, b []byte) int {
+	end := start
+	for _, bi := range b {
+		switch {
+		case bi == '\t':
+			// Assumes tabStopSize is a power-of-two.
+			end = (end + tabStopSize) &^ (tabStopSize - 1)
+		case bi&0x80 == 0:
+			// End of code point or ASCII character.
+			end++
+		}
+	}
+	return end - start
+}
+
+func indentLength(line []byte) int {
+	for i, b := range line {
+		if b != ' ' && b != '\t' {
+			return i
+		}
+	}
+	return len(line)
 }
 
 func isBlankLine(line []byte) bool {

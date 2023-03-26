@@ -16,7 +16,11 @@
 
 package commonmark
 
-import "unsafe"
+import (
+	"bytes"
+	"math"
+	"unsafe"
+)
 
 // RootBlock represents a "top-level" block,
 // that is, a block whose parent is the document.
@@ -182,29 +186,78 @@ type blockParser struct {
 	root      *RootBlock
 	container *Block // nil represents the document
 
-	lineStart int // number of bytes from beginning of root block to start of line
-	line      []byte
-	i         int  // byte position within line
-	tabpos    int8 // column position within current tab character
-	opening   bool
+	lineStart    int // number of bytes from beginning of root block to start of line
+	line         []byte
+	i            int  // byte position within line
+	col          int  // 0-based column position within line
+	tabRemaining int8 // number of columns left within current tab character
+	opening      bool
 
-	listItemIndent int // indentation of current list item being matched
+	listItemIndent int // indentation of current list item being true
 }
 
-// Bytes returns the bytes remaining in the line.
-func (p *blockParser) Bytes() []byte {
-	return p.line[p.i:]
+func newBlockParser(root *RootBlock, line []byte) *blockParser {
+	p := &blockParser{
+		root:    root,
+		opening: true,
+	}
+	p.reset(0, line)
+	return p
+}
+
+func (p *blockParser) reset(lineStart int, line []byte) {
+	p.lineStart = lineStart
+	p.line = line
+	p.i = 0
+	p.col = 0
+	p.updateTabRemaining()
+	p.listItemIndent = math.MaxInt
+}
+
+// BytesAfterIndent returns the bytes
+// after any indentation immediately following the cursor.
+func (p *blockParser) BytesAfterIndent() []byte {
+	return bytes.TrimLeft(p.line[p.i:], " \t")
+}
+
+// IsRestBlank reports whether the rest of the line is blank.
+func (p *blockParser) IsRestBlank() bool {
+	return isBlankLine(p.line[p.i:])
 }
 
 // Advance advances the parser by n bytes.
 // It panics if n is greater than the number of bytes remaining in the line.
 func (p *blockParser) Advance(n int) {
+	if n < 0 {
+		panic("negative length")
+	}
+	if n == 0 {
+		return
+	}
 	newIndex := p.i + n
 	if newIndex > len(p.line) {
 		panic("index out of bounds")
 	}
+	if p.i < len(p.line) && p.line[p.i] == '\t' {
+		p.col += int(p.tabRemaining) + columnWidth(p.col, p.line[p.i+1:newIndex])
+	} else {
+		p.col += columnWidth(p.col, p.line[p.i:newIndex])
+	}
 	p.i = newIndex
-	p.tabpos = 0
+	p.updateTabRemaining()
+}
+
+func (p *blockParser) updateTabRemaining() {
+	if p.i < len(p.line) && p.line[p.i] == '\t' {
+		p.tabRemaining = int8(columnWidth(p.col, p.line[p.i:p.i+1]))
+	} else {
+		p.tabRemaining = 0
+	}
+}
+
+// AdvanceToEOL advances the cursor to the end of the line.
+func (p *blockParser) AdvanceToEOL() {
+	p.Advance(len(p.line) - p.i)
 }
 
 // Indent returns the number of columns of whitespace
@@ -213,26 +266,17 @@ func (p *blockParser) Indent() int {
 	if p.i >= len(p.line) {
 		return 0
 	}
-	var indent int
+	var firstCharWidth int
 	switch p.line[p.i] {
 	case ' ':
-		indent = 1
+		firstCharWidth = 1
 	case '\t':
-		indent = tabStopSize - int(p.tabpos)
+		firstCharWidth = int(p.tabRemaining)
 	default:
 		return 0
 	}
-	for _, c := range p.line[p.i+1:] {
-		switch c {
-		case ' ':
-			indent++
-		case '\t':
-			indent += tabStopSize
-		default:
-			return indent
-		}
-	}
-	return indent
+	rest := p.line[p.i+1:]
+	return firstCharWidth + columnWidth(p.col+firstCharWidth, rest[:indentLength(rest)])
 }
 
 // ConsumeIndent advances the parser by n columns of whitespace.
@@ -242,18 +286,21 @@ func (p *blockParser) ConsumeIndent(n int) {
 		switch {
 		case p.i < len(p.line) && p.line[p.i] == ' ':
 			n--
-			p.i++
+			p.col++
 		case p.i < len(p.line) && p.line[p.i] == '\t':
-			if n < tabStopSize-int(p.tabpos) {
-				p.tabpos += int8(n)
+			if n < int(p.tabRemaining) {
+				p.col += n
+				p.tabRemaining -= int8(n)
 				return
 			}
-			n -= tabStopSize - int(p.tabpos)
-			p.i++
-			p.tabpos = 0
+			p.col += int(p.tabRemaining)
+			n -= int(p.tabRemaining)
 		default:
 			panic("consumed past end of indent")
 		}
+
+		p.i++
+		p.updateTabRemaining()
 	}
 }
 
@@ -379,80 +426,77 @@ func (p *blockParser) EndBlock() {
 	p.container = findParent(p.root, p.container)
 }
 
-type parseResult int8
-
-const (
-	noMatch parseResult = iota
-	matched
-	matchedEntireLine
-)
-
 // codeBlockIndentLimit is the column width of an indent
 // required to start an indented code block.
 const codeBlockIndentLimit = 4
 
-var blockStarts = []func(*blockParser) parseResult{
+const blockQuotePrefix = ">"
+
+var blockStarts = []func(*blockParser) bool{
 	// Block quote.
-	func(p *blockParser) parseResult {
+	func(p *blockParser) bool {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
-			return noMatch
+			return false
 		}
-		end := parseBlockQuote(trimIndent(p.Bytes()))
-		if end < 0 {
-			return noMatch
+		if !bytes.HasPrefix(p.BytesAfterIndent(), []byte(blockQuotePrefix)) {
+			return false
 		}
 		p.ConsumeIndent(indent)
 		p.OpenBlock(BlockQuoteKind)
-		p.Advance(end)
-		return matched
+		p.Advance(len(blockQuotePrefix))
+		if p.Indent() > 0 {
+			p.ConsumeIndent(1)
+		}
+		return true
 	},
 
 	// ATX heading.
-	func(p *blockParser) parseResult {
+	func(p *blockParser) bool {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
-			return noMatch
+			return false
 		}
-		h := parseATXHeading(trimIndent(p.Bytes()))
+		h := parseATXHeading(p.BytesAfterIndent())
 		if h.level < 1 {
-			return noMatch
+			return false
 		}
 		p.ConsumeIndent(indent)
 		p.OpenBlock(ATXHeadingKind)
 		p.Advance(h.contentStart)
 		p.CollectInline(UnparsedKind, h.contentEnd-h.contentStart)
-		p.Advance(len(p.Bytes()))
+		p.AdvanceToEOL()
 		p.EndBlock()
-		return matchedEntireLine
+		return true
 	},
 
 	// Thematic break.
-	func(p *blockParser) parseResult {
+	func(p *blockParser) bool {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
-			return noMatch
+			return false
 		}
-		end := parseThematicBreak(trimIndent(p.Bytes()))
+		end := parseThematicBreak(p.BytesAfterIndent())
 		if end < 0 {
-			return noMatch
+			return false
 		}
 		p.ConsumeIndent(indent)
 		p.OpenBlock(ThematicBreakKind)
 		p.Advance(end)
 		p.EndBlock()
-		return matchedEntireLine
+		p.AdvanceToEOL()
+		return true
 	},
 
 	// List item.
-	func(p *blockParser) parseResult {
+	func(p *blockParser) bool {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit && p.ContainerKind() != ListKind {
-			return noMatch
+			return false
 		}
-		m := parseListMarker(trimIndent(p.Bytes()))
+		m := parseListMarker(p.BytesAfterIndent())
 		if m.end < 0 || (p.ContainerKind() == ParagraphKind && m.isOrdered() && m.n != 1) {
-			return noMatch
+			return false
 		}
 		p.ConsumeIndent(indent)
 		if p.ContainerKind() != ListKind || p.ContainerListDelim() != m.delim {
@@ -460,22 +504,22 @@ var blockStarts = []func(*blockParser) parseResult{
 		}
 		p.OpenListBlock(ListItemKind, m.delim, indent+m.end+1)
 		p.CollectInline(ListMarkerKind, m.end)
-		return matched
+		return true
 	},
 
 	// Indented code block.
-	func(p *blockParser) parseResult {
-		if p.Indent() < codeBlockIndentLimit || isBlankLine(p.Bytes()) || p.TipKind() == ParagraphKind {
-			return noMatch
+	func(p *blockParser) bool {
+		if p.Indent() < codeBlockIndentLimit || p.IsRestBlank() || p.TipKind() == ParagraphKind {
+			return false
 		}
 		p.ConsumeIndent(codeBlockIndentLimit)
 		p.OpenBlock(IndentedCodeBlockKind)
-		return matched
+		return true
 	},
 }
 
 type blockRule struct {
-	match        func(*blockParser) parseResult
+	match        func(*blockParser) bool
 	onClose      func(source []byte, block *Block)
 	canContain   func(childKind BlockKind) bool
 	acceptsLines bool
@@ -483,11 +527,11 @@ type blockRule struct {
 
 var blocks = map[BlockKind]blockRule{
 	documentKind: {
-		match:      func(*blockParser) parseResult { return matched },
+		match:      func(*blockParser) bool { return true },
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	ListKind: {
-		match:      func(*blockParser) parseResult { return matched },
+		match:      func(*blockParser) bool { return true },
 		canContain: func(childKind BlockKind) bool { return childKind == ListItemKind },
 		onClose: func(source []byte, block *Block) {
 			endsWithBlankLine := func(block *Block) bool {
@@ -524,57 +568,56 @@ var blocks = map[BlockKind]blockRule{
 		},
 	},
 	ListItemKind: {
-		match: func(p *blockParser) parseResult {
+		match: func(p *blockParser) bool {
 			indent := p.Indent()
 			switch {
-			case isBlankLine(p.Bytes()):
-				return matched
+			case p.IsRestBlank():
+				return true
 			case indent >= p.CurrentItemIndent():
 				p.ConsumeIndent(p.CurrentItemIndent())
-				return matched
+				return true
 			default:
-				return noMatch
+				return false
 			}
 		},
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	BlockQuoteKind: {
-		match: func(p *blockParser) parseResult {
+		match: func(p *blockParser) bool {
 			indent := p.Indent()
 			if indent >= codeBlockIndentLimit {
-				return noMatch
+				return false
 			}
-			end := parseBlockQuote(trimIndent(p.Bytes()))
-			if end < 0 {
-				return noMatch
+			if !bytes.HasPrefix(p.BytesAfterIndent(), []byte(blockQuotePrefix)) {
+				return false
 			}
 			p.ConsumeIndent(indent)
-			p.Advance(end)
-			return matched
+			p.Advance(len(blockQuotePrefix))
+			if p.Indent() > 0 {
+				p.ConsumeIndent(1)
+			}
+			return true
 		},
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	IndentedCodeBlockKind: {
-		match: func(p *blockParser) parseResult {
-			if b := p.Bytes(); isBlankLine(b) {
-				p.Advance(len(b))
-				return matchedEntireLine
+		match: func(p *blockParser) bool {
+			if p.IsRestBlank() {
+				p.AdvanceToEOL()
+				return true
 			}
 			indent := p.Indent()
 			if indent < codeBlockIndentLimit {
-				return noMatch
+				return false
 			}
 			p.ConsumeIndent(codeBlockIndentLimit)
-			return matched
+			return true
 		},
 		acceptsLines: true,
 	},
 	ParagraphKind: {
-		match: func(p *blockParser) parseResult {
-			if isBlankLine(p.Bytes()) {
-				return noMatch
-			}
-			return matched
+		match: func(p *blockParser) bool {
+			return !p.IsRestBlank()
 		},
 		acceptsLines: true,
 	},
@@ -609,22 +652,6 @@ func parseThematicBreak(line []byte) (end int) {
 		return -1
 	}
 	return end
-}
-
-// parseBlockQuote attempts to parse a [block quote marker] from the beginning of the line.
-// It returns the end of the block quote marker
-// or -1 if the line does not begin with the marker.
-// parseBlockQuote assumes that the caller has stripped any leading indentation.
-//
-// [block quote marker]: https://spec.commonmark.org/0.30/#block-quote-marker
-func parseBlockQuote(line []byte) (end int) {
-	if len(line) == 0 || line[0] != '>' {
-		return -1
-	}
-	if len(line) > 1 && line[1] == ' ' {
-		return 2
-	}
-	return 1
 }
 
 type atxHeading struct {

@@ -48,6 +48,14 @@ func (inline *Inline) End() int {
 	return inline.end
 }
 
+// IndentWidth returns the number of spaces the [IndentKind] span represents.
+func (inline *Inline) IndentWidth() int {
+	if inline == nil {
+		return 0
+	}
+	return inline.indent
+}
+
 func (inline *Inline) Children() []*Inline {
 	if inline == nil {
 		return nil
