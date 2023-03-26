@@ -39,6 +39,7 @@ var supportedSections = map[string]struct{}{
 	"Paragraphs":      {},
 	"ATX headings":    {},
 	"Block quotes":    {},
+	// TODO(soon): "Lists": {},
 }
 
 var skippedExamples = map[int]string{
@@ -53,6 +54,8 @@ var skippedExamples = map[int]string{
 	226: "needs hard line breaks",
 	235: "lists not implemented",
 	237: "fenced code blocks not implemented",
+	308: "HTML comments not implemented",
+	309: "HTML comments not implemented",
 }
 
 func TestSpec(t *testing.T) {

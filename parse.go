@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 )
 
 // tabStopSize is the multiple of columns that a [tab] advances to.
@@ -95,9 +96,10 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 		},
 	}
 	bp := &blockParser{
-		root:    root,
-		line:    line,
-		opening: true,
+		root:           root,
+		line:           line,
+		opening:        true,
+		listItemIndent: math.MaxInt,
 	}
 	openNewBlocks(bp, true)
 	if !root.isOpen() {
@@ -146,7 +148,12 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 		if rule.match == nil {
 			return false
 		}
-		switch rule.match(p) {
+		if child.Kind() == ListItemKind {
+			p.listItemIndent = child.listItemIndent
+		}
+		result := rule.match(p)
+		p.listItemIndent = math.MaxInt
+		switch result {
 		case noMatch:
 			return false
 		case matchedEntireLine:
@@ -174,7 +181,7 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 func openNewBlocks(p *blockParser, allMatched bool) {
 	if len(p.Bytes()) == 0 {
 		// Special case: EOF. Close the root block.
-		p.root.close(p.lineStart)
+		p.root.close(p.root.Source, p.lineStart)
 		p.container = nil
 		return
 	}
@@ -197,9 +204,9 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 			}
 
 			if p.container == nil {
-				p.root.close(p.lineStart)
+				p.root.close(p.root.Source, p.lineStart)
 			} else {
-				p.container.lastChild().Block().close(p.lineStart)
+				p.container.lastChild().Block().close(p.root.Source, p.lineStart)
 			}
 		}()
 	}
@@ -226,6 +233,18 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 }
 
 func addLineText(p *blockParser) {
+	isBlank := isBlankLine(p.Bytes())
+	if lastChild := p.container.lastChild().Block(); lastChild != nil && isBlank {
+		lastChild.lastLineBlank = true
+	}
+	lastLineBlank := isBlank && !(p.ContainerKind() == BlockQuoteKind ||
+		p.ContainerKind() == FencedCodeBlockKind ||
+		(p.ContainerKind() == ListItemKind && len(p.container.children) == 0 && p.container.start == p.lineStart))
+	// Propagate lastLineBlank up through parents:
+	for c := p.container; c != nil; c = findParent(p.root, c) {
+		c.lastLineBlank = lastLineBlank
+	}
+
 	switch {
 	case blocks[p.ContainerKind()].acceptsLines:
 		if indent := p.Indent(); indent > 0 {
@@ -238,10 +257,13 @@ func addLineText(p *blockParser) {
 				end:    p.lineStart + p.i,
 			}).AsNode())
 		}
-	case !isBlankLine(p.Bytes()):
+	case !isBlank:
 		// Create paragraph container for line.
 		p.OpenBlock(ParagraphKind)
 		p.ConsumeIndent(p.Indent())
+		if p.container == nil {
+			return
+		}
 	default:
 		return
 	}
@@ -364,6 +386,18 @@ func isBlankLine(line []byte) bool {
 		}
 	}
 	return true
+}
+
+func hasTabOrSpacePrefixOrEOL(line []byte) bool {
+	return len(line) == 0 ||
+		line[0] == ' ' ||
+		line[0] == '\t' ||
+		line[0] == '\n' ||
+		line[0] == '\r'
+}
+
+func isASCIIDigit(c byte) bool {
+	return '0' <= c && c <= '9'
 }
 
 // isEndEscaped reports whether s ends with an odd number of backslashes.

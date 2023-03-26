@@ -37,6 +37,11 @@ type Block struct {
 	start    int
 	end      int
 	children []Node
+
+	listDelim      byte // set for [ListKind] and [ListItemKind]
+	listItemIndent int  // set for [ListItemKind]
+	listLoose      bool // set for [ListKind]
+	lastLineBlank  bool
 }
 
 func (b *Block) Kind() BlockKind {
@@ -82,6 +87,35 @@ func (b *Block) HeadingLevel(source []byte) int {
 	}
 }
 
+// IsOrderedList reports whether the block is
+// an ordered list or an ordered list item.
+func (b *Block) IsOrderedList() bool {
+	return b != nil && (b.listDelim == '.' || b.listDelim == ')')
+}
+
+// IsTightList reports whether the block is
+// an tight list or a tight list item.
+func (b *Block) IsTightList() bool {
+	return b != nil && !b.listLoose
+}
+
+// ListItemNumber returns the number of a [ListItemKind] block
+// or -1 if the block does not represent an ordered list item.
+func (b *Block) ListItemNumber(source []byte) int {
+	if !b.IsOrderedList() || b.kind != ListItemKind {
+		return -1
+	}
+	marker := b.firstChild().Inline()
+	if marker.Kind() != ListMarkerKind {
+		return -1
+	}
+	parsed := parseListMarker(source[marker.Start():marker.End()])
+	if parsed.end < 0 {
+		return -1
+	}
+	return parsed.n
+}
+
 func (b *Block) AsNode() Node {
 	if b == nil {
 		return Node{}
@@ -90,6 +124,14 @@ func (b *Block) AsNode() Node {
 		typ: nodeTypeBlock,
 		ptr: unsafe.Pointer(b),
 	}
+}
+
+func (b *Block) firstChild() Node {
+	children := b.Children()
+	if len(children) == 0 {
+		return Node{}
+	}
+	return children[0]
 }
 
 func (b *Block) lastChild() Node {
@@ -107,9 +149,12 @@ func (b *Block) isOpen() bool {
 // close closes b and any open descendents.
 // It assumes that only the last child can be open.
 // Calling close on a nil block no-ops.
-func (b *Block) close(end int) {
+func (b *Block) close(source []byte, end int) {
 	for ; b.isOpen(); b = b.lastChild().Block() {
 		b.end = end
+		if f := blocks[b.kind].onClose; f != nil {
+			f(source, b)
+		}
 	}
 }
 
@@ -142,6 +187,8 @@ type blockParser struct {
 	i         int  // byte position within line
 	tabpos    int8 // column position within current tab character
 	opening   bool
+
+	listItemIndent int // indentation of current list item being matched
 }
 
 // Bytes returns the bytes remaining in the line.
@@ -229,8 +276,37 @@ func (p *blockParser) TipKind() BlockKind {
 	return tip.kind
 }
 
+func (p *blockParser) ContainerListDelim() byte {
+	if p.container == nil {
+		return 0
+	}
+	return p.container.listDelim
+}
+
+func (p *blockParser) CurrentItemIndent() int {
+	return p.listItemIndent
+}
+
 // OpenBlock starts a new block at the current position.
 func (p *blockParser) OpenBlock(kind BlockKind) {
+	if kind == ListKind || kind == ListItemKind {
+		panic("OpenBlock cannot be called with ListKind or ListItemKind")
+	}
+	p.openBlock(kind)
+}
+
+func (p *blockParser) OpenListBlock(kind BlockKind, delim byte, indent int) {
+	if kind != ListKind && kind != ListItemKind {
+		panic("OpenListBlock must be called with ListKind or ListItemKind")
+	}
+	p.openBlock(kind)
+	if p.container != nil {
+		p.container.listDelim = delim
+		p.container.listItemIndent = indent
+	}
+}
+
+func (p *blockParser) openBlock(kind BlockKind) {
 	if !p.opening {
 		panic("OpenBlock cannot be called in this context")
 	}
@@ -240,7 +316,7 @@ func (p *blockParser) OpenBlock(kind BlockKind) {
 		if rule := blocks[p.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
 			break
 		}
-		p.container.close(p.lineStart)
+		p.container.close(p.root.Source, p.lineStart)
 		if p.container == nil {
 			return
 		}
@@ -251,7 +327,7 @@ func (p *blockParser) OpenBlock(kind BlockKind) {
 	if p.container == nil {
 		if p.root.kind != 0 {
 			// Attempting to open a new root block.
-			p.root.close(p.lineStart)
+			p.root.close(p.root.Source, p.lineStart)
 			return
 		}
 		p.root.kind = kind
@@ -262,7 +338,7 @@ func (p *blockParser) OpenBlock(kind BlockKind) {
 	}
 
 	// Normal case: append to the parent's children list.
-	p.container.lastChild().Block().close(p.lineStart)
+	p.container.lastChild().Block().close(p.root.Source, p.lineStart)
 	newChild := &Block{
 		kind:  kind,
 		start: p.lineStart + p.i,
@@ -274,7 +350,7 @@ func (p *blockParser) OpenBlock(kind BlockKind) {
 
 // CollectInline adds a new [UnparsedKind] inline to the current block,
 // starting at the current position and ending after n bytes.
-func (p *blockParser) CollectInline(n int) {
+func (p *blockParser) CollectInline(kind InlineKind, n int) {
 	if !p.opening {
 		panic("CollectInline cannot be called in this context")
 	}
@@ -284,7 +360,7 @@ func (p *blockParser) CollectInline(n int) {
 		return
 	}
 	p.container.children = append(p.container.children, (&Inline{
-		kind:  UnparsedKind,
+		kind:  kind,
 		start: start,
 		end:   p.lineStart + p.i,
 	}).AsNode())
@@ -296,10 +372,10 @@ func (p *blockParser) EndBlock() {
 		panic("EndBlock cannot be called in this context")
 	}
 	if p.container == nil {
-		p.root.close(p.lineStart + p.i)
+		p.root.close(p.root.Source, p.lineStart+p.i)
 		return
 	}
-	p.container.close(p.lineStart + p.i)
+	p.container.close(p.root.Source, p.lineStart+p.i)
 	p.container = findParent(p.root, p.container)
 }
 
@@ -345,7 +421,7 @@ var blockStarts = []func(*blockParser) parseResult{
 		p.ConsumeIndent(indent)
 		p.OpenBlock(ATXHeadingKind)
 		p.Advance(h.contentStart)
-		p.CollectInline(h.contentEnd - h.contentStart)
+		p.CollectInline(UnparsedKind, h.contentEnd-h.contentStart)
 		p.Advance(len(p.Bytes()))
 		p.EndBlock()
 		return matchedEntireLine
@@ -367,6 +443,26 @@ var blockStarts = []func(*blockParser) parseResult{
 		p.EndBlock()
 		return matchedEntireLine
 	},
+
+	// List item.
+	func(p *blockParser) parseResult {
+		indent := p.Indent()
+		if indent >= codeBlockIndentLimit && p.ContainerKind() != ListKind {
+			return noMatch
+		}
+		m := parseListMarker(trimIndent(p.Bytes()))
+		if m.end < 0 || (p.ContainerKind() == ParagraphKind && m.isOrdered() && m.n != 1) {
+			return noMatch
+		}
+		p.ConsumeIndent(indent)
+		if p.ContainerKind() != ListKind || p.ContainerListDelim() != m.delim {
+			p.OpenListBlock(ListKind, m.delim, 0)
+		}
+		p.OpenListBlock(ListItemKind, m.delim, indent+m.end+1)
+		p.CollectInline(ListMarkerKind, m.end)
+		return matched
+	},
+
 	// Indented code block.
 	func(p *blockParser) parseResult {
 		if p.Indent() < codeBlockIndentLimit || isBlankLine(p.Bytes()) || p.TipKind() == ParagraphKind {
@@ -380,6 +476,7 @@ var blockStarts = []func(*blockParser) parseResult{
 
 type blockRule struct {
 	match        func(*blockParser) parseResult
+	onClose      func(source []byte, block *Block)
 	canContain   func(childKind BlockKind) bool
 	acceptsLines bool
 }
@@ -387,6 +484,58 @@ type blockRule struct {
 var blocks = map[BlockKind]blockRule{
 	documentKind: {
 		match:      func(*blockParser) parseResult { return matched },
+		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
+	},
+	ListKind: {
+		match:      func(*blockParser) parseResult { return matched },
+		canContain: func(childKind BlockKind) bool { return childKind == ListItemKind },
+		onClose: func(source []byte, block *Block) {
+			endsWithBlankLine := func(block *Block) bool {
+				for block != nil {
+					if block.lastLineBlank {
+						return true
+					}
+					if k := block.Kind(); k != ListKind && k != ListItemKind {
+						return false
+					}
+					block = block.lastChild().Block()
+				}
+				return false
+			}
+		determineLoose:
+			for i, item := range block.Children() {
+				if i < len(block.Children())-1 && endsWithBlankLine(item.Block()) {
+					block.listLoose = true
+					break determineLoose
+				}
+				for j, subitem := range item.Block().Children() {
+					if (i < len(block.Children())-1 || j < len(item.Block().Children())) &&
+						endsWithBlankLine(subitem.Block()) {
+						block.listLoose = true
+						break determineLoose
+					}
+				}
+			}
+			if block.listLoose {
+				for _, item := range block.Children() {
+					item.Block().listLoose = true
+				}
+			}
+		},
+	},
+	ListItemKind: {
+		match: func(p *blockParser) parseResult {
+			indent := p.Indent()
+			switch {
+			case isBlankLine(p.Bytes()):
+				return matched
+			case indent >= p.CurrentItemIndent():
+				p.ConsumeIndent(p.CurrentItemIndent())
+				return matched
+			default:
+				return noMatch
+			}
+		},
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	BlockQuoteKind: {
@@ -564,4 +713,55 @@ scanTrailingHashes:
 		}
 	}
 	return h
+}
+
+type listMarker struct {
+	delim byte // one of '-', '+', '*', '.', or ')'
+	n     int
+	end   int // always delimiter position + 1
+}
+
+// parseListMarker attempts to parse a [list marker] at the beginning of the line.
+// The end is -1 if the line does not begin with a marker.
+// parseListMarker assumes that the caller has stripped any leading indentation.
+//
+// [list marker]: https://spec.commonmark.org/0.30/#list-marker
+func parseListMarker(line []byte) listMarker {
+	if len(line) == 0 {
+		return listMarker{end: -1}
+	}
+	var n int
+	switch c := line[0]; {
+	case c == '-' || c == '+' || c == '*':
+		if !hasTabOrSpacePrefixOrEOL(line[1:]) {
+			return listMarker{end: -1}
+		}
+		return listMarker{delim: line[0], end: 1}
+	case isASCIIDigit(c):
+		// Ordered list. Continue.
+		n = int(c - '0')
+	default:
+		return listMarker{end: -1}
+	}
+	const maxDigits = 9
+	for i := 1; i < maxDigits+1 && i < len(line); i++ {
+		switch c := line[i]; {
+		case isASCIIDigit(c):
+			// Continue.
+			n *= 10
+			n += int(c - '0')
+		case c == '.' || c == ')':
+			if !hasTabOrSpacePrefixOrEOL(line[i+1:]) {
+				return listMarker{end: -1}
+			}
+			return listMarker{delim: c, n: n, end: i + 1}
+		default:
+			return listMarker{end: -1}
+		}
+	}
+	return listMarker{end: -1}
+}
+
+func (m listMarker) isOrdered() bool {
+	return m.delim == '.' || m.delim == ')'
 }
