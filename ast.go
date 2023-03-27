@@ -81,6 +81,7 @@ const (
 	HardLineBreakKind
 	IndentKind
 	ListMarkerKind
+	InfoStringKind
 
 	// UnparsedKind is used for inline text that has not been tokenized.
 	UnparsedKind

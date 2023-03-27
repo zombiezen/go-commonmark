@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"math"
 )
 
 // tabStopSize is the multiple of columns that a [tab] advances to.
@@ -144,13 +143,13 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 		if rule.match == nil {
 			return false
 		}
-		if child.Kind() == ListItemKind {
-			p.listItemIndent = child.listItemIndent
-			p.listItemHasChildren = len(child.Children()) > 1
-		}
+		p.setupMatch(child)
 		ok := rule.match(p)
-		p.listItemIndent = math.MaxInt
-		p.listItemHasChildren = false
+		p.clearMatchData()
+		if p.state == stateDescendTerminated {
+			child.close(p.root.Source, p.lineStart+p.i)
+			return true
+		}
 		if !ok {
 			return false
 		}

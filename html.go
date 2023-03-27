@@ -17,6 +17,7 @@
 package commonmark
 
 import (
+	"bytes"
 	"fmt"
 	"html"
 	"io"
@@ -47,7 +48,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 	case ThematicBreakKind:
 		dst = append(dst, "<hr>"...)
 	case ATXHeadingKind, SetextHeadingKind:
-		level := block.HeadingLevel(source)
+		level := block.HeadingLevel()
 		dst = append(dst, "<h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
@@ -56,7 +57,16 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
 	case IndentedCodeBlockKind, FencedCodeBlockKind:
-		dst = append(dst, "<pre><code>"...)
+		dst = append(dst, "<pre><code"...)
+		if info := block.InfoString(); info != nil {
+			words := bytes.Fields(source[info.Start():info.End()])
+			if len(words) > 0 {
+				dst = append(dst, ` class="language-`...)
+				dst = append(dst, html.EscapeString(string(words[0]))...)
+				dst = append(dst, `"`...)
+			}
+		}
+		dst = append(dst, ">"...)
 		dst = appendChildrenHTML(dst, source, block.Children(), false)
 		dst = append(dst, "</code></pre>"...)
 	case BlockQuoteKind:

@@ -42,10 +42,24 @@ type Block struct {
 	end      int
 	children []Node
 
-	listDelim      byte // set for [ListKind] and [ListItemKind]
-	listItemIndent int  // set for [ListItemKind]
-	listLoose      bool // set for [ListKind]
-	lastLineBlank  bool
+	// indent is the block's indentation.
+	// For [ListItemKind], it is the number of columns required to continue the block.
+	// For [FencedCodeBlockKind], it is the number of columns
+	// to strip at the beginning of each line.
+	indent int
+
+	// n is a kind-specific datum.
+	// For [ATXHeadingKind] and [SetextHeadingKind], it is the level of the heading.
+	// For [FencedCodeBlockKind], it is the number of characters used in the starting code fence.
+	n int
+
+	// char is a kind-specific datum.
+	// For [ListKind] and [ListItemKind], it is the character at the end of the list marker.
+	// For [FencedCodeBlockKind], it is the character of the fence.
+	char byte
+
+	listLoose     bool // valid for [ListKind] and [ListItemKind]
+	lastLineBlank bool
 }
 
 func (b *Block) Kind() BlockKind {
@@ -76,16 +90,10 @@ func (b *Block) Children() []Node {
 	return b.children
 }
 
-func (b *Block) HeadingLevel(source []byte) int {
+func (b *Block) HeadingLevel() int {
 	switch b.Kind() {
 	case ATXHeadingKind:
-		span := source[b.Start():b.End()]
-		for i := 0; i < len(span) && i < 6; i++ {
-			if span[i] != '#' {
-				return i
-			}
-		}
-		return 6
+		return b.n
 	default:
 		return 0
 	}
@@ -94,7 +102,7 @@ func (b *Block) HeadingLevel(source []byte) int {
 // IsOrderedList reports whether the block is
 // an ordered list or an ordered list item.
 func (b *Block) IsOrderedList() bool {
-	return b != nil && (b.listDelim == '.' || b.listDelim == ')')
+	return b != nil && (b.char == '.' || b.char == ')')
 }
 
 // IsTightList reports whether the block is
@@ -118,6 +126,19 @@ func (b *Block) ListItemNumber(source []byte) int {
 		return -1
 	}
 	return parsed.n
+}
+
+// InfoString returns the info string node for a [FencedCodeBlockKind] block
+// or nil otherwise.
+func (b *Block) InfoString() *Inline {
+	if b.Kind() != FencedCodeBlockKind {
+		return nil
+	}
+	c := b.firstChild().Inline()
+	if c.Kind() != InfoStringKind {
+		return nil
+	}
+	return c
 }
 
 func (b *Block) AsNode() Node {
@@ -180,6 +201,11 @@ const (
 	documentKind
 )
 
+// IsHeading reports whether the kind is [ATXHeadingKind] or [SetextHeadingKind].
+func (k BlockKind) IsHeading() bool {
+	return k == ATXHeadingKind || k == SetextHeadingKind
+}
+
 // blockParser is a cursor on a line of text,
 // used while splitting a document into blocks.
 //
@@ -198,8 +224,10 @@ type blockParser struct {
 	tabRemaining int8 // number of columns left within current tab character
 
 	state               int8
-	listItemIndent      int  // indentation of current list item being true
 	listItemHasChildren bool // whether the current list item has children beyond the marker
+	fenceChar           byte
+	fenceCharCount      int
+	currentIndent       int // indentation of current list item being true
 }
 
 // Block parser states.
@@ -212,18 +240,20 @@ const (
 	stateOpenMatched
 	// stateLineConsumed is a terminal state used in [openNewBlocks].
 	// It is entered from [stateOpening]
-	// after [*blockParser.AdvanceToEOL] has been called.
+	// after [*blockParser.ConsumeLine] has been called.
 	stateLineConsumed
-	// stateDescending is a terminal state used in [descendOpenBlocks].
+	// stateDescending is the initial state used in [descendOpenBlocks].
 	// No modification of the AST is permitted in this state.
 	stateDescending
+	// stateDescendTerminated is a terminal state used in [descendOpenBlocks].
+	// It is entered from [stateDescending]
+	// after [*blockParser.ConsumeLine] has been called.
+	// No modification of the AST is permitted in this state.
+	stateDescendTerminated
 )
 
 func newBlockParser(root *RootBlock, line []byte) *blockParser {
-	p := &blockParser{
-		root:  root,
-		state: stateOpening,
-	}
+	p := &blockParser{root: root}
 	p.reset(0, line)
 	return p
 }
@@ -235,8 +265,26 @@ func (p *blockParser) reset(lineStart int, newSource []byte) {
 	p.i = 0
 	p.col = 0
 	p.updateTabRemaining()
-	p.listItemIndent = math.MaxInt
+	p.clearMatchData()
+}
+
+func (p *blockParser) setupMatch(child *Block) {
+	p.state = stateDescending
+	p.currentIndent = child.indent
+	switch child.Kind() {
+	case ListItemKind:
+		p.listItemHasChildren = len(child.Children()) > 1
+	case FencedCodeBlockKind:
+		p.fenceChar = child.char
+		p.fenceCharCount = child.n
+	}
+}
+
+func (p *blockParser) clearMatchData() {
+	p.currentIndent = math.MaxInt
 	p.listItemHasChildren = false
+	p.fenceChar = 0
+	p.fenceCharCount = 0
 }
 
 // BytesAfterIndent returns the bytes
@@ -284,11 +332,15 @@ func (p *blockParser) updateTabRemaining() {
 }
 
 // ConsumeLine advances the cursor past the end of the line.
-// This will skip adding text to the block when called during a block start.
+// This will skip processing line text,
+// and additionally close the block when called during block matching.
 func (p *blockParser) ConsumeLine() {
 	p.Advance(len(p.line) - p.i)
-	if p.state == stateOpening || p.state == stateOpenMatched {
+	switch p.state {
+	case stateOpening, stateOpenMatched:
 		p.state = stateLineConsumed
+	case stateDescending:
+		p.state = stateDescendTerminated
 	}
 }
 
@@ -359,24 +411,32 @@ func (p *blockParser) TipKind() BlockKind {
 }
 
 func (p *blockParser) ContainerListDelim() byte {
-	if p.container == nil {
+	if k := p.ContainerKind(); k != ListKind && k != ListItemKind {
 		return 0
 	}
-	return p.container.listDelim
+	return p.container.char
 }
 
-func (p *blockParser) CurrentItemIndent() int {
-	return p.listItemIndent
+// CurrentBlockIndent returns the indent value assigned to the current block.
+// Only valid while matching continuation lines.
+func (p *blockParser) CurrentBlockIndent() int {
+	return p.currentIndent
 }
 
 func (p *blockParser) CurrentItemHasChildren() bool {
 	return p.listItemHasChildren
 }
 
+// CurrentCodeFence returns the character and number of characters
+// used to start the code fence being currently matched.
+func (p *blockParser) CurrentCodeFence() (c byte, n int) {
+	return p.fenceChar, p.fenceCharCount
+}
+
 // OpenBlock starts a new block at the current position.
 func (p *blockParser) OpenBlock(kind BlockKind) {
-	if kind == ListKind || kind == ListItemKind {
-		panic("OpenBlock cannot be called with ListKind or ListItemKind")
+	if kind == ListKind || kind == ListItemKind || kind == FencedCodeBlockKind || kind.IsHeading() {
+		panic("OpenBlock cannot be called with this kind")
 	}
 	p.openBlock(kind)
 }
@@ -387,13 +447,31 @@ func (p *blockParser) OpenListBlock(kind BlockKind, delim byte) {
 	}
 	p.openBlock(kind)
 	if p.container != nil {
-		p.container.listDelim = delim
+		p.container.char = delim
+	}
+}
+
+func (p *blockParser) OpenFencedCodeBlock(fenceChar byte, numChars int) {
+	p.openBlock(FencedCodeBlockKind)
+	if p.container != nil {
+		p.container.char = fenceChar
+		p.container.n = numChars
+	}
+}
+
+func (p *blockParser) OpenHeadingBlock(kind BlockKind, level int) {
+	if !kind.IsHeading() {
+		panic("OpenHeadingBlock must be called with ATXHeadingKind or SetextHeadingKind")
+	}
+	p.openBlock(kind)
+	if p.container != nil {
+		p.container.n = level
 	}
 }
 
 func (p *blockParser) openBlock(kind BlockKind) {
 	switch p.state {
-	case stateDescending:
+	case stateDescending, stateDescendTerminated:
 		panic("OpenBlock cannot be called in this context")
 	case stateOpening:
 		p.state = stateOpenMatched
@@ -436,11 +514,17 @@ func (p *blockParser) openBlock(kind BlockKind) {
 	p.container = newChild
 }
 
-// SetListItemIndent sets the current list item's indentation.
-func (p *blockParser) SetListItemIndent(indent int) {
-	switch {
-	case p.ContainerKind() == ListItemKind:
-		p.container.listItemIndent = indent
+// SetContainerIndent sets the container's indentation.
+func (p *blockParser) SetContainerIndent(indent int) {
+	switch p.state {
+	case stateOpening:
+		panic("SetListItemIndent cannot be called before a match")
+	case stateDescending, stateDescendTerminated:
+		panic("SetListItemIndent cannot be called in this context")
+	}
+	switch k := p.ContainerKind(); {
+	case k == ListItemKind || k == FencedCodeBlockKind:
+		p.container.indent = indent
 	case p.container != nil:
 		panic("can't set indent for this block type")
 	}
@@ -450,7 +534,7 @@ func (p *blockParser) SetListItemIndent(indent int) {
 // starting at the current position and ending after n bytes.
 func (p *blockParser) CollectInline(kind InlineKind, n int) {
 	switch p.state {
-	case stateDescending:
+	case stateDescending, stateDescendTerminated:
 		panic("CollectInline cannot be called in this context")
 	case stateOpening:
 		p.state = stateOpenMatched
@@ -470,7 +554,7 @@ func (p *blockParser) CollectInline(kind InlineKind, n int) {
 // EndBlock ends a block at the current position.
 func (p *blockParser) EndBlock() {
 	switch p.state {
-	case stateDescending:
+	case stateDescending, stateDescendTerminated:
 		panic("EndBlock cannot be called in this context")
 	case stateOpening:
 		p.state = stateOpenMatched
@@ -520,11 +604,32 @@ var blockStarts = []func(*blockParser){
 		}
 
 		p.ConsumeIndent(indent)
-		p.OpenBlock(ATXHeadingKind)
+		p.OpenHeadingBlock(ATXHeadingKind, h.level)
 		p.Advance(h.contentStart)
 		p.CollectInline(UnparsedKind, h.contentEnd-h.contentStart)
 		p.ConsumeLine()
 		p.EndBlock()
+	},
+
+	// Fenced code block.
+	func(p *blockParser) {
+		indent := p.Indent()
+		if indent >= codeBlockIndentLimit {
+			return
+		}
+		f := parseCodeFence(p.BytesAfterIndent())
+		if f.n == 0 {
+			return
+		}
+
+		p.ConsumeIndent(indent)
+		p.OpenFencedCodeBlock(f.char, f.n)
+		p.SetContainerIndent(indent)
+		if f.infoStart >= 0 {
+			p.Advance(f.infoStart)
+			p.CollectInline(InfoStringKind, f.infoEnd-f.infoStart)
+		}
+		p.ConsumeLine()
 	},
 
 	// Thematic break.
@@ -567,7 +672,7 @@ var blockStarts = []func(*blockParser){
 		p.OpenListBlock(ListItemKind, m.delim)
 		p.CollectInline(ListMarkerKind, m.end)
 		if p.IsRestBlank() {
-			p.SetListItemIndent(indent + m.end + 1)
+			p.SetContainerIndent(indent + m.end + 1)
 			p.ConsumeLine()
 			return
 		}
@@ -581,7 +686,7 @@ var blockStarts = []func(*blockParser){
 		default:
 			p.ConsumeIndent(padding)
 		}
-		p.SetListItemIndent(indent + m.end + padding)
+		p.SetContainerIndent(indent + m.end + padding)
 	},
 
 	// Indented code block.
@@ -657,8 +762,8 @@ var blocks = map[BlockKind]blockRule{
 				}
 				p.ConsumeIndent(p.Indent())
 				return true
-			case p.Indent() >= p.CurrentItemIndent():
-				p.ConsumeIndent(p.CurrentItemIndent())
+			case p.Indent() >= p.CurrentBlockIndent():
+				p.ConsumeIndent(p.CurrentBlockIndent())
 				return true
 			default:
 				return false
@@ -683,6 +788,27 @@ var blocks = map[BlockKind]blockRule{
 			return true
 		},
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
+	},
+	FencedCodeBlockKind: {
+		match: func(p *blockParser) bool {
+			lineIndent := p.Indent()
+			if lineIndent < codeBlockIndentLimit {
+				startChar, startCharCount := p.CurrentCodeFence()
+				f := parseCodeFence(p.BytesAfterIndent())
+				if f.n > 0 && f.infoStart < 0 && f.char == startChar && f.n >= startCharCount {
+					// Closing fence.
+					p.ConsumeLine()
+					return false
+				}
+			}
+			if blockIndent := p.CurrentBlockIndent(); lineIndent < blockIndent {
+				p.ConsumeIndent(lineIndent)
+			} else {
+				p.ConsumeIndent(blockIndent)
+			}
+			return true
+		},
+		acceptsLines: true,
 	},
 	IndentedCodeBlockKind: {
 		match: func(p *blockParser) bool {
@@ -835,6 +961,56 @@ scanTrailingHashes:
 		}
 	}
 	return h
+}
+
+type codeFence struct {
+	char      byte // either '`' or '~'
+	n         int
+	infoStart int
+	infoEnd   int
+}
+
+// parseCodeFence attempts to parse a [code fence] at the beginning of the line.
+// [codeFence.n] is 0 if the line does not begin with a marker.
+// parseCodeFence assumes that the caller has stripped any leading indentation.
+//
+// [code fence]: https://spec.commonmark.org/0.30/#code-fence
+func parseCodeFence(line []byte) codeFence {
+	const minConsecutive = 3
+	if len(line) < minConsecutive || (line[0] != '`' && line[0] != '~') {
+		return codeFence{infoStart: -1, infoEnd: -1}
+	}
+	f := codeFence{
+		char:      line[0],
+		n:         1,
+		infoStart: -1,
+		infoEnd:   -1,
+	}
+	for f.n < len(line) && line[f.n] == f.char {
+		f.n++
+	}
+	if f.n < minConsecutive {
+		return codeFence{infoStart: -1, infoEnd: -1}
+	}
+	for i := f.n; i < len(line) && f.infoStart < 0; i++ {
+		switch c := line[i]; {
+		case c == '`' && f.char == '`':
+			// "If the info string comes after a backtick fence,
+			// it may not contain any backtick characters."
+			return codeFence{infoStart: -1, infoEnd: -1}
+		case c != ' ' && c != '\t' && c != '\r' && c != '\n':
+			f.infoStart = i
+		}
+	}
+	if f.infoStart >= 0 {
+		// Trim trailing whitespace.
+		for f.infoEnd = len(line); f.infoEnd > f.infoStart; f.infoEnd-- {
+			if c := line[f.infoEnd-1]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+				break
+			}
+		}
+	}
+	return f
 }
 
 type listMarker struct {
