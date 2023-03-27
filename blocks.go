@@ -191,15 +191,32 @@ type blockParser struct {
 	i            int  // byte position within line
 	col          int  // 0-based column position within line
 	tabRemaining int8 // number of columns left within current tab character
-	opening      bool
 
+	state          int8
 	listItemIndent int // indentation of current list item being true
 }
 
+// Block parser states.
+const (
+	// stateOpening is the initial state used in [openNewBlocks].
+	stateOpening = iota
+	// stateOpenMatched is a state used in [openNewBlocks].
+	// It is entered from [stateOpening] after the parser has moved its position
+	// or the AST has been modified.
+	stateOpenMatched
+	// stateLineConsumed is a terminal state used in [openNewBlocks].
+	// It is entered from [stateOpening]
+	// after [*blockParser.AdvanceToEOL] has been called.
+	stateLineConsumed
+	// stateDescending is a terminal state used in [descendOpenBlocks].
+	// No modification of the AST is permitted in this state.
+	stateDescending
+)
+
 func newBlockParser(root *RootBlock, line []byte) *blockParser {
 	p := &blockParser{
-		root:    root,
-		opening: true,
+		root:  root,
+		state: stateOpening,
 	}
 	p.reset(0, line)
 	return p
@@ -234,6 +251,9 @@ func (p *blockParser) Advance(n int) {
 	if n == 0 {
 		return
 	}
+	if p.state == stateOpening {
+		p.state = stateOpenMatched
+	}
 	newIndex := p.i + n
 	if newIndex > len(p.line) {
 		panic("index out of bounds")
@@ -258,6 +278,9 @@ func (p *blockParser) updateTabRemaining() {
 // AdvanceToEOL advances the cursor to the end of the line.
 func (p *blockParser) AdvanceToEOL() {
 	p.Advance(len(p.line) - p.i)
+	if p.state == stateOpening || p.state == stateOpenMatched {
+		p.state = stateLineConsumed
+	}
 }
 
 // Indent returns the number of columns of whitespace
@@ -283,6 +306,9 @@ func (p *blockParser) Indent() int {
 // It panics if n is greater than bp.Indent().
 func (p *blockParser) ConsumeIndent(n int) {
 	for n > 0 {
+		if p.state == stateOpening {
+			p.state = stateOpenMatched
+		}
 		switch {
 		case p.i < len(p.line) && p.line[p.i] == ' ':
 			n--
@@ -342,20 +368,22 @@ func (p *blockParser) OpenBlock(kind BlockKind) {
 	p.openBlock(kind)
 }
 
-func (p *blockParser) OpenListBlock(kind BlockKind, delim byte, indent int) {
+func (p *blockParser) OpenListBlock(kind BlockKind, delim byte) {
 	if kind != ListKind && kind != ListItemKind {
 		panic("OpenListBlock must be called with ListKind or ListItemKind")
 	}
 	p.openBlock(kind)
 	if p.container != nil {
 		p.container.listDelim = delim
-		p.container.listItemIndent = indent
 	}
 }
 
 func (p *blockParser) openBlock(kind BlockKind) {
-	if !p.opening {
+	switch p.state {
+	case stateDescending:
 		panic("OpenBlock cannot be called in this context")
+	case stateOpening:
+		p.state = stateOpenMatched
 	}
 
 	// Move up the tree until we find a block that can handle the new child.
@@ -395,11 +423,24 @@ func (p *blockParser) openBlock(kind BlockKind) {
 	p.container = newChild
 }
 
+// SetListItemIndent sets the current list item's indentation.
+func (p *blockParser) SetListItemIndent(indent int) {
+	switch {
+	case p.ContainerKind() == ListItemKind:
+		p.container.listItemIndent = indent
+	case p.container != nil:
+		panic("can't set indent for this block type")
+	}
+}
+
 // CollectInline adds a new [UnparsedKind] inline to the current block,
 // starting at the current position and ending after n bytes.
 func (p *blockParser) CollectInline(kind InlineKind, n int) {
-	if !p.opening {
+	switch p.state {
+	case stateDescending:
 		panic("CollectInline cannot be called in this context")
+	case stateOpening:
+		p.state = stateOpenMatched
 	}
 	start := p.lineStart + p.i
 	p.Advance(n)
@@ -415,8 +456,11 @@ func (p *blockParser) CollectInline(kind InlineKind, n int) {
 
 // EndBlock ends a block at the current position.
 func (p *blockParser) EndBlock() {
-	if !p.opening {
+	switch p.state {
+	case stateDescending:
 		panic("EndBlock cannot be called in this context")
+	case stateOpening:
+		p.state = stateOpenMatched
 	}
 	if p.container == nil {
 		p.root.close(p.root.Source, p.lineStart+p.i)
@@ -432,89 +476,97 @@ const codeBlockIndentLimit = 4
 
 const blockQuotePrefix = ">"
 
-var blockStarts = []func(*blockParser) bool{
+var blockStarts = []func(*blockParser){
 	// Block quote.
-	func(p *blockParser) bool {
+	func(p *blockParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
-			return false
+			return
 		}
 		if !bytes.HasPrefix(p.BytesAfterIndent(), []byte(blockQuotePrefix)) {
-			return false
+			return
 		}
+
 		p.ConsumeIndent(indent)
 		p.OpenBlock(BlockQuoteKind)
 		p.Advance(len(blockQuotePrefix))
 		if p.Indent() > 0 {
 			p.ConsumeIndent(1)
 		}
-		return true
 	},
 
 	// ATX heading.
-	func(p *blockParser) bool {
+	func(p *blockParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
-			return false
+			return
 		}
 		h := parseATXHeading(p.BytesAfterIndent())
 		if h.level < 1 {
-			return false
+			return
 		}
+
 		p.ConsumeIndent(indent)
 		p.OpenBlock(ATXHeadingKind)
 		p.Advance(h.contentStart)
 		p.CollectInline(UnparsedKind, h.contentEnd-h.contentStart)
 		p.AdvanceToEOL()
 		p.EndBlock()
-		return true
 	},
 
 	// Thematic break.
-	func(p *blockParser) bool {
+	func(p *blockParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
-			return false
+			return
 		}
 		end := parseThematicBreak(p.BytesAfterIndent())
 		if end < 0 {
-			return false
+			return
 		}
+
 		p.ConsumeIndent(indent)
 		p.OpenBlock(ThematicBreakKind)
 		p.Advance(end)
 		p.EndBlock()
 		p.AdvanceToEOL()
-		return true
 	},
 
 	// List item.
-	func(p *blockParser) bool {
+	func(p *blockParser) {
 		indent := p.Indent()
-		if indent >= codeBlockIndentLimit && p.ContainerKind() != ListKind {
-			return false
+		if indent >= codeBlockIndentLimit {
+			return
 		}
 		m := parseListMarker(p.BytesAfterIndent())
 		if m.end < 0 || (p.ContainerKind() == ParagraphKind && m.isOrdered() && m.n != 1) {
-			return false
+			return
 		}
+
 		p.ConsumeIndent(indent)
 		if p.ContainerKind() != ListKind || p.ContainerListDelim() != m.delim {
-			p.OpenListBlock(ListKind, m.delim, 0)
+			p.OpenListBlock(ListKind, m.delim)
 		}
-		p.OpenListBlock(ListItemKind, m.delim, indent+m.end+1)
+		p.OpenListBlock(ListItemKind, m.delim)
 		p.CollectInline(ListMarkerKind, m.end)
-		return true
+		padding := p.Indent()
+		switch {
+		case padding < 1:
+			padding = 1
+		case padding > 4:
+			padding = 1
+			p.ConsumeIndent(1)
+		}
+		p.SetListItemIndent(indent + m.end + padding)
 	},
 
 	// Indented code block.
-	func(p *blockParser) bool {
+	func(p *blockParser) {
 		if p.Indent() < codeBlockIndentLimit || p.IsRestBlank() || p.TipKind() == ParagraphKind {
-			return false
+			return
 		}
 		p.ConsumeIndent(codeBlockIndentLimit)
 		p.OpenBlock(IndentedCodeBlockKind)
-		return true
 	},
 }
 

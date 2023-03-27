@@ -96,13 +96,15 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 		},
 	}
 	bp := newBlockParser(root, line)
-	openNewBlocks(bp, true)
+	hasText := openNewBlocks(bp, true)
 	if !root.isOpen() {
 		// Single-line block.
 		root.Source = p.consume()
 		return root, nil
 	}
-	addLineText(bp)
+	if hasText {
+		addLineText(bp)
+	}
 
 	// Parse subsequent lines.
 	for {
@@ -111,14 +113,15 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 
 		allMatched := descendOpenBlocks(bp)
 
-		bp.opening = true
-		openNewBlocks(bp, allMatched)
+		hasText := openNewBlocks(bp, allMatched)
 		if bp.container == nil {
 			p.parsePos = root.end
 			root.Source = p.consume()
 			return root, nil
 		}
-		addLineText(bp)
+		if hasText {
+			addLineText(bp)
+		}
 	}
 }
 
@@ -166,12 +169,12 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 // in the CommonMark recommended parsing strategy.
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
-func openNewBlocks(p *blockParser, allMatched bool) {
+func openNewBlocks(p *blockParser, allMatched bool) (hasText bool) {
 	if len(p.line) == 0 {
 		// Special case: EOF. Close the root block.
 		p.root.close(p.root.Source, p.lineStart)
 		p.container = nil
-		return
+		return false
 	}
 
 	// If we didn't match everything in [descendOpenBlocks],
@@ -199,20 +202,23 @@ func openNewBlocks(p *blockParser, allMatched bool) {
 		}()
 	}
 
+openingLoop:
 	for p.root.isOpen() &&
 		(p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines) {
-		found := false
 		for _, startFunc := range blockStarts {
-			if startFunc(p) {
-				found = true
-				break
+			p.state = stateOpening
+			startFunc(p)
+			switch p.state {
+			case stateOpenMatched:
+				continue openingLoop
+			case stateLineConsumed:
+				return false
 			}
 		}
-		if !found {
-			// Hit the text.
-			break
-		}
+		// Hit the text.
+		return true
 	}
+	return true
 }
 
 func addLineText(p *blockParser) {
