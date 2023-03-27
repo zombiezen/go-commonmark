@@ -146,9 +146,11 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 		}
 		if child.Kind() == ListItemKind {
 			p.listItemIndent = child.listItemIndent
+			p.listItemHasChildren = len(child.Children()) > 1
 		}
 		ok := rule.match(p)
 		p.listItemIndent = math.MaxInt
+		p.listItemHasChildren = false
 		if !ok {
 			return false
 		}

@@ -182,6 +182,11 @@ const (
 
 // blockParser is a cursor on a line of text,
 // used while splitting a document into blocks.
+//
+// Exported methods on blockParser
+// represent the contract between Parser and the rules.
+// In the future, blockParser could be exported to permit custom block rules,
+// but it's unclear how often this is needed.
 type blockParser struct {
 	root      *RootBlock
 	container *Block // nil represents the document
@@ -192,8 +197,9 @@ type blockParser struct {
 	col          int  // 0-based column position within line
 	tabRemaining int8 // number of columns left within current tab character
 
-	state          int8
-	listItemIndent int // indentation of current list item being true
+	state               int8
+	listItemIndent      int  // indentation of current list item being true
+	listItemHasChildren bool // whether the current list item has children beyond the marker
 }
 
 // Block parser states.
@@ -230,6 +236,7 @@ func (p *blockParser) reset(lineStart int, newSource []byte) {
 	p.col = 0
 	p.updateTabRemaining()
 	p.listItemIndent = math.MaxInt
+	p.listItemHasChildren = false
 }
 
 // BytesAfterIndent returns the bytes
@@ -360,6 +367,10 @@ func (p *blockParser) ContainerListDelim() byte {
 
 func (p *blockParser) CurrentItemIndent() int {
 	return p.listItemIndent
+}
+
+func (p *blockParser) CurrentItemHasChildren() bool {
+	return p.listItemHasChildren
 }
 
 // OpenBlock starts a new block at the current position.
@@ -544,6 +555,10 @@ var blockStarts = []func(*blockParser){
 		if m.end < 0 || (p.ContainerKind() == ParagraphKind && m.isOrdered() && m.n != 1) {
 			return
 		}
+		// If this interrupts a paragraph, ensure first line isn't blank.
+		if p.ContainerKind() == ParagraphKind && isBlankLine(p.BytesAfterIndent()[m.end:]) {
+			return
+		}
 
 		p.ConsumeIndent(indent)
 		if p.ContainerKind() != ListKind || p.ContainerListDelim() != m.delim {
@@ -551,6 +566,11 @@ var blockStarts = []func(*blockParser){
 		}
 		p.OpenListBlock(ListItemKind, m.delim)
 		p.CollectInline(ListMarkerKind, m.end)
+		if p.IsRestBlank() {
+			p.SetListItemIndent(indent + m.end + 1)
+			p.ConsumeLine()
+			return
+		}
 		padding := p.Indent()
 		switch {
 		case padding < 1:
@@ -629,11 +649,15 @@ var blocks = map[BlockKind]blockRule{
 	},
 	ListItemKind: {
 		match: func(p *blockParser) bool {
-			indent := p.Indent()
 			switch {
 			case p.IsRestBlank():
+				if !p.CurrentItemHasChildren() {
+					// A list item can begin with at most one blank line.
+					return false
+				}
+				p.ConsumeIndent(p.Indent())
 				return true
-			case indent >= p.CurrentItemIndent():
+			case p.Indent() >= p.CurrentItemIndent():
 				p.ConsumeIndent(p.CurrentItemIndent())
 				return true
 			default:
