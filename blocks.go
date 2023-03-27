@@ -222,9 +222,10 @@ func newBlockParser(root *RootBlock, line []byte) *blockParser {
 	return p
 }
 
-func (p *blockParser) reset(lineStart int, line []byte) {
+func (p *blockParser) reset(lineStart int, newSource []byte) {
 	p.lineStart = lineStart
-	p.line = line
+	p.root.Source = newSource
+	p.line = newSource[lineStart:]
 	p.i = 0
 	p.col = 0
 	p.updateTabRemaining()
@@ -275,8 +276,9 @@ func (p *blockParser) updateTabRemaining() {
 	}
 }
 
-// AdvanceToEOL advances the cursor to the end of the line.
-func (p *blockParser) AdvanceToEOL() {
+// ConsumeLine advances the cursor past the end of the line.
+// This will skip adding text to the block when called during a block start.
+func (p *blockParser) ConsumeLine() {
 	p.Advance(len(p.line) - p.i)
 	if p.state == stateOpening || p.state == stateOpenMatched {
 		p.state = stateLineConsumed
@@ -510,7 +512,7 @@ var blockStarts = []func(*blockParser){
 		p.OpenBlock(ATXHeadingKind)
 		p.Advance(h.contentStart)
 		p.CollectInline(UnparsedKind, h.contentEnd-h.contentStart)
-		p.AdvanceToEOL()
+		p.ConsumeLine()
 		p.EndBlock()
 	},
 
@@ -529,7 +531,7 @@ var blockStarts = []func(*blockParser){
 		p.OpenBlock(ThematicBreakKind)
 		p.Advance(end)
 		p.EndBlock()
-		p.AdvanceToEOL()
+		p.ConsumeLine()
 	},
 
 	// List item.
@@ -556,6 +558,8 @@ var blockStarts = []func(*blockParser){
 		case padding > 4:
 			padding = 1
 			p.ConsumeIndent(1)
+		default:
+			p.ConsumeIndent(padding)
 		}
 		p.SetListItemIndent(indent + m.end + padding)
 	},
@@ -598,14 +602,18 @@ var blocks = map[BlockKind]blockRule{
 				}
 				return false
 			}
+
+			// Check for a blank line after non-final items.
+			items := block.Children()
 		determineLoose:
-			for i, item := range block.Children() {
-				if i < len(block.Children())-1 && endsWithBlankLine(item.Block()) {
+			for i, item := range items {
+				if i < len(items)-1 && endsWithBlankLine(item.Block()) {
 					block.listLoose = true
 					break determineLoose
 				}
-				for j, subitem := range item.Block().Children() {
-					if (i < len(block.Children())-1 || j < len(item.Block().Children())) &&
+				subitems := item.Block().Children()
+				for j, subitem := range subitems {
+					if (i < len(items)-1 || j < len(subitems)-1) &&
 						endsWithBlankLine(subitem.Block()) {
 						block.listLoose = true
 						break determineLoose
@@ -613,7 +621,7 @@ var blocks = map[BlockKind]blockRule{
 				}
 			}
 			if block.listLoose {
-				for _, item := range block.Children() {
+				for _, item := range items {
 					item.Block().listLoose = true
 				}
 			}
@@ -654,16 +662,27 @@ var blocks = map[BlockKind]blockRule{
 	},
 	IndentedCodeBlockKind: {
 		match: func(p *blockParser) bool {
+			indent := p.Indent()
 			if p.IsRestBlank() {
-				p.AdvanceToEOL()
+				p.ConsumeIndent(indent)
 				return true
 			}
-			indent := p.Indent()
 			if indent < codeBlockIndentLimit {
 				return false
 			}
 			p.ConsumeIndent(codeBlockIndentLimit)
 			return true
+		},
+		onClose: func(source []byte, block *Block) {
+			// "Blank lines preceding or following an indented code block are not included in it."
+			for i := len(block.children) - 1; i >= 0; i-- {
+				child := block.children[i].Inline()
+				if child.Kind() != UnparsedKind || !isBlankLine(source[child.Start():child.End()]) {
+					break
+				}
+				block.children[i] = Node{} // free for GC
+				block.children = block.children[:i:i]
+			}
 		},
 		acceptsLines: true,
 	},

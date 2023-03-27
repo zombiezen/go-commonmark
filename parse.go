@@ -109,7 +109,8 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 	// Parse subsequent lines.
 	for {
 		lineStart := p.parsePos
-		bp.reset(lineStart, p.readline())
+		p.readline()
+		bp.reset(lineStart, p.buf[:p.parsePos:p.parsePos])
 
 		allMatched := descendOpenBlocks(bp)
 
@@ -222,13 +223,15 @@ openingLoop:
 }
 
 func addLineText(p *blockParser) {
+	// Record whether a block ends in a blank line
+	// for the purpose of checking for list looseness.
 	isBlank := p.IsRestBlank()
 	if lastChild := p.container.lastChild().Block(); lastChild != nil && isBlank {
 		lastChild.lastLineBlank = true
 	}
 	lastLineBlank := isBlank && !(p.ContainerKind() == BlockQuoteKind ||
 		p.ContainerKind() == FencedCodeBlockKind ||
-		(p.ContainerKind() == ListItemKind && len(p.container.children) == 0 && p.container.start == p.lineStart))
+		(p.ContainerKind() == ListItemKind && len(p.container.children) == 1 && p.container.start >= p.lineStart))
 	// Propagate lastLineBlank up through parents:
 	for c := p.container; c != nil; c = findParent(p.root, c) {
 		c.lastLineBlank = lastLineBlank

@@ -41,6 +41,7 @@ var supportedSections = map[string]struct{}{
 	"ATX headings":    {},
 	"Block quotes":    {},
 	"Lists":           {},
+	"List items":      {},
 }
 
 var skippedExamples = map[int]string{
@@ -51,14 +52,18 @@ var skippedExamples = map[int]string{
 	76:  "uses inline backslash escapes",
 	226: "needs hard line breaks",
 	237: "fenced code blocks not implemented",
+	263: "fenced code blocks not implemented",
+	278: "fenced code blocks not implemented",
+	279: "TODO(now)",
+	280: "TODO(now)",
+	285: "TODO(now)",
+	300: "setext headings not implemented",
 	308: "HTML comments not implemented",
 	309: "HTML comments not implemented",
 	317: "link reference definitions not implemented",
 	318: "fenced code blocks not implemented",
 	321: "fenced code blocks not implemented",
 	324: "fenced code blocks not implemented",
-	325: "tightness buggy",
-	326: "tightness buggy",
 }
 
 func TestSpec(t *testing.T) {

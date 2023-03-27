@@ -66,7 +66,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 	case ListKind:
 		if block.IsOrderedList() {
 			dst = append(dst, "<ol"...)
-			if n := block.firstChild().Block().ListItemNumber(source); n > 1 {
+			if n := block.firstChild().Block().ListItemNumber(source); n >= 0 && n != 1 {
 				dst = append(dst, ` start="`...)
 				dst = strconv.AppendInt(dst, int64(n), 10)
 				dst = append(dst, `"`...)
