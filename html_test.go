@@ -35,13 +35,15 @@ import (
 )
 
 var supportedSections = map[string]struct{}{
-	"Tabs":            {},
-	"Thematic breaks": {},
-	"Paragraphs":      {},
-	"ATX headings":    {},
-	"Block quotes":    {},
-	"Lists":           {},
-	"List items":      {},
+	"Tabs":                 {},
+	"Thematic breaks":      {},
+	"ATX headings":         {},
+	"Indented code blocks": {},
+	"Paragraphs":           {},
+	"Blank lines":          {},
+	"Block quotes":         {},
+	"List items":           {},
+	"Lists":                {},
 }
 
 var skippedExamples = map[int]string{
@@ -50,6 +52,7 @@ var skippedExamples = map[int]string{
 	65:  "uses inline backslash escapes",
 	66:  "emphasis not implemented",
 	76:  "uses inline backslash escapes",
+	115: "setext headings not implemented",
 	226: "needs hard line breaks",
 	237: "fenced code blocks not implemented",
 	263: "fenced code blocks not implemented",

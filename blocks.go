@@ -687,14 +687,14 @@ var blocks = map[BlockKind]blockRule{
 	IndentedCodeBlockKind: {
 		match: func(p *blockParser) bool {
 			indent := p.Indent()
-			if p.IsRestBlank() {
-				p.ConsumeIndent(indent)
-				return true
-			}
 			if indent < codeBlockIndentLimit {
-				return false
+				if !p.IsRestBlank() {
+					return false
+				}
+				p.ConsumeIndent(indent)
+			} else {
+				p.ConsumeIndent(codeBlockIndentLimit)
 			}
-			p.ConsumeIndent(codeBlockIndentLimit)
 			return true
 		},
 		onClose: func(source []byte, block *Block) {
