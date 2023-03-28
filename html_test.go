@@ -59,16 +59,10 @@ var skippedExamples = map[int]string{
 	141: "setext headings not implemented",
 	145: "inline code not implemented",
 	226: "needs hard line breaks",
-	237: "fenced code blocks not implemented",
-	263: "fenced code blocks not implemented",
-	278: "fenced code blocks not implemented",
 	300: "setext headings not implemented",
 	308: "HTML comments not implemented",
 	309: "HTML comments not implemented",
 	317: "link reference definitions not implemented",
-	318: "fenced code blocks not implemented",
-	321: "fenced code blocks not implemented",
-	324: "fenced code blocks not implemented",
 }
 
 func TestSpec(t *testing.T) {

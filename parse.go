@@ -112,8 +112,10 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 		bp.reset(lineStart, p.buf[:p.parsePos:p.parsePos])
 
 		allMatched := descendOpenBlocks(bp)
-
-		hasText := openNewBlocks(bp, allMatched)
+		hasText := false
+		if bp.state != stateDescendTerminated {
+			hasText = openNewBlocks(bp, allMatched)
+		}
 		if bp.container == nil {
 			p.parsePos = root.end
 			root.Source = p.consume()
