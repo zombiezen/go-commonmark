@@ -18,75 +18,6 @@ package commonmark
 
 import "unsafe"
 
-// Inline represents Markdown content elements like text, links, or emphasis.
-type Inline struct {
-	kind     InlineKind
-	start    int
-	end      int
-	indent   int
-	children []*Inline
-}
-
-func (inline *Inline) Kind() InlineKind {
-	if inline == nil {
-		return 0
-	}
-	return InlineKind(inline.kind)
-}
-
-func (inline *Inline) Start() int {
-	if inline == nil {
-		return -1
-	}
-	return inline.start
-}
-
-func (inline *Inline) End() int {
-	if inline == nil {
-		return -1
-	}
-	return inline.end
-}
-
-// IndentWidth returns the number of spaces the [IndentKind] span represents.
-func (inline *Inline) IndentWidth() int {
-	if inline == nil {
-		return 0
-	}
-	return inline.indent
-}
-
-func (inline *Inline) Children() []*Inline {
-	if inline == nil {
-		return nil
-	}
-	return inline.children
-}
-
-func (inline *Inline) AsNode() Node {
-	if inline == nil {
-		return Node{}
-	}
-	return Node{
-		typ: nodeTypeInline,
-		ptr: unsafe.Pointer(inline),
-	}
-}
-
-type InlineKind uint16
-
-const (
-	TextKind InlineKind = 1 + iota
-	SoftLineBreakKind
-	HardLineBreakKind
-	IndentKind
-	ListMarkerKind
-	InfoStringKind
-
-	// UnparsedKind is used for inline text that has not been tokenized.
-	UnparsedKind
-)
-
 const (
 	nodeTypeBlock = 1 + iota
 	nodeTypeInline
@@ -114,4 +45,26 @@ func (n Node) Inline() *Inline {
 		return nil
 	}
 	return (*Inline)(n.ptr)
+}
+
+// AsNode converts the inline node to a [Node] pointer.
+func (inline *Inline) AsNode() Node {
+	if inline == nil {
+		return Node{}
+	}
+	return Node{
+		typ: nodeTypeInline,
+		ptr: unsafe.Pointer(inline),
+	}
+}
+
+// AsNode converts the block node to a [Node] pointer.
+func (b *Block) AsNode() Node {
+	if b == nil {
+		return Node{}
+	}
+	return Node{
+		typ: nodeTypeBlock,
+		ptr: unsafe.Pointer(b),
+	}
 }

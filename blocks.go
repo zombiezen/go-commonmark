@@ -19,7 +19,6 @@ package commonmark
 import (
 	"bytes"
 	"math"
-	"unsafe"
 )
 
 // RootBlock represents a "top-level" block,
@@ -139,16 +138,6 @@ func (b *Block) InfoString() *Inline {
 		return nil
 	}
 	return c
-}
-
-func (b *Block) AsNode() Node {
-	if b == nil {
-		return Node{}
-	}
-	return Node{
-		typ: nodeTypeBlock,
-		ptr: unsafe.Pointer(b),
-	}
 }
 
 func (b *Block) firstChild() Node {
