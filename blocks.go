@@ -190,6 +190,11 @@ const (
 	documentKind
 )
 
+// IsCode reports whether the kind is [IndentedCodeBlockKind] or [FencedCodeBlockKind].
+func (k BlockKind) IsCode() bool {
+	return k == IndentedCodeBlockKind || k == FencedCodeBlockKind
+}
+
 // IsHeading reports whether the kind is [ATXHeadingKind] or [SetextHeadingKind].
 func (k BlockKind) IsHeading() bool {
 	return k == ATXHeadingKind || k == SetextHeadingKind
@@ -533,11 +538,16 @@ func (p *blockParser) CollectInline(kind InlineKind, n int) {
 	if p.container == nil {
 		return
 	}
-	p.container.children = append(p.container.children, (&Inline{
-		kind:  kind,
-		start: start,
-		end:   p.lineStart + p.i,
-	}).AsNode())
+	if kind == InfoStringKind {
+		node := parseInfoString(p.root.Source, start, p.lineStart+p.i).AsNode()
+		p.container.children = append(p.container.children, node)
+	} else {
+		p.container.children = append(p.container.children, (&Inline{
+			kind:  kind,
+			start: start,
+			end:   p.lineStart + p.i,
+		}).AsNode())
+	}
 }
 
 // EndBlock ends a block at the current position.

@@ -36,6 +36,7 @@ import (
 
 var supportedSections = map[string]struct{}{
 	"Tabs":                 {},
+	"Backslash escapes":    {},
 	"Thematic breaks":      {},
 	"ATX headings":         {},
 	"Indented code blocks": {},
@@ -48,6 +49,12 @@ var supportedSections = map[string]struct{}{
 }
 
 var skippedExamples = map[int]string{
+	15:  "emphasis not implemented",
+	17:  "inline code not implemented",
+	20:  "autolinks not implemented",
+	21:  "raw HTML not implemented",
+	22:  "links not implemented",
+	23:  "link reference definitions not implemented",
 	56:  "emphasis not implemented",
 	59:  "setext headings not implemented",
 	65:  "uses inline backslash escapes",

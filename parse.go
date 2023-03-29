@@ -30,6 +30,7 @@ import (
 // [tab]: https://spec.commonmark.org/0.30/#tabs
 const tabStopSize = 4
 
+// Parser splits a document into blocks.
 type Parser struct {
 	buf      []byte // current block being parsed
 	offset   int64  // offset from beginning of stream to beginning of buf
@@ -40,12 +41,17 @@ type Parser struct {
 	err error // non-nil indicates there is no more data after end of buf
 }
 
+// NewParser returns a parser that reads from r.
+//
+// Parsers maintain their own buffering and may read data from r
+// beyond the blocks requested.
 func NewParser(r io.Reader) *Parser {
 	return &Parser{
 		r: r,
 	}
 }
 
+// Parse parses an in-memory document and returns the sequence of blocks.
 func Parse(source []byte) []*RootBlock {
 	if bytes.IndexByte(source, 0) >= 0 {
 		// Contains one or more NUL bytes.
@@ -60,6 +66,10 @@ func Parse(source []byte) []*RootBlock {
 	for {
 		block, err := p.NextBlock()
 		if err == io.EOF {
+			inlineParser := new(InlineParser)
+			for _, block := range blocks {
+				inlineParser.Rewrite(block)
+			}
 			return blocks
 		}
 		if err != nil {
@@ -69,6 +79,10 @@ func Parse(source []byte) []*RootBlock {
 	}
 }
 
+// NextBlock reads the next top-level block in the document,
+// returning the first error encountered.
+// Blocks returned by NextBlock will typically contained [UnparsedKind] nodes for any text:
+// use [*InlineParser.Rewrite] to complete parsing.
 func (p *Parser) NextBlock() (*RootBlock, error) {
 	// Keep going until we encounter a non-blank line.
 	var line []byte
@@ -415,6 +429,13 @@ func hasTabOrSpacePrefixOrEOL(line []byte) bool {
 
 func isASCIIDigit(c byte) bool {
 	return '0' <= c && c <= '9'
+}
+
+func isASCIIPunctuation(c byte) bool {
+	return '!' <= c && c <= '/' ||
+		':' <= c && c <= '@' ||
+		'[' <= c && c <= '`' ||
+		'{' <= c && c <= '~'
 }
 
 // isEndEscaped reports whether s ends with an odd number of backslashes.

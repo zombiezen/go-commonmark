@@ -17,11 +17,11 @@
 package commonmark
 
 import (
-	"bytes"
 	"fmt"
 	"html"
 	"io"
 	"strconv"
+	"strings"
 )
 
 func RenderHTML(w io.Writer, blocks []*RootBlock) error {
@@ -59,10 +59,10 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 	case IndentedCodeBlockKind, FencedCodeBlockKind:
 		dst = append(dst, "<pre><code"...)
 		if info := block.InfoString(); info != nil {
-			words := bytes.Fields(source[info.Start():info.End()])
+			words := strings.Fields(info.Text(source))
 			if len(words) > 0 {
 				dst = append(dst, ` class="language-`...)
-				dst = append(dst, html.EscapeString(string(words[0]))...)
+				dst = append(dst, html.EscapeString(words[0])...)
 				dst = append(dst, `"`...)
 			}
 		}
@@ -127,7 +127,7 @@ func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 		dst = append(dst, "<br>\n"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
-			dst = append(dst, " "...)
+			dst = append(dst, ' ')
 		}
 	}
 	return dst
