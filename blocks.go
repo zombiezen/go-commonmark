@@ -826,7 +826,7 @@ var blocks = map[BlockKind]blockRule{
 			// "Blank lines preceding or following an indented code block are not included in it."
 			for i := len(block.children) - 1; i >= 0; i-- {
 				child := block.children[i].Inline()
-				if child.Kind() != UnparsedKind || !isBlankLine(source[child.Start():child.End()]) {
+				if child.Kind() != TextKind || !isBlankLine(source[child.Start():child.End()]) {
 					break
 				}
 				block.children[i] = Node{} // free for GC

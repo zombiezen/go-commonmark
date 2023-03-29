@@ -277,8 +277,12 @@ func addLineText(p *lineParser) {
 		return
 	}
 
+	inlineKind := UnparsedKind
+	if p.ContainerKind().IsCode() {
+		inlineKind = TextKind
+	}
 	p.container.children = append(p.container.children, (&Inline{
-		kind:  UnparsedKind,
+		kind:  inlineKind,
 		start: p.lineStart + p.i,
 		end:   p.lineStart + len(p.line),
 	}).AsNode())
