@@ -30,8 +30,8 @@ import (
 // [tab]: https://spec.commonmark.org/0.30/#tabs
 const tabStopSize = 4
 
-// Parser splits a document into blocks.
-type Parser struct {
+// A BlockParser splits a CommonMark document into blocks.
+type BlockParser struct {
 	buf      []byte // current block being parsed
 	offset   int64  // offset from beginning of stream to beginning of buf
 	parsePos int    // parse position within buf
@@ -41,24 +41,24 @@ type Parser struct {
 	err error // non-nil indicates there is no more data after end of buf
 }
 
-// NewParser returns a parser that reads from r.
+// NewBlockParser returns a block parser that reads from r.
 //
-// Parsers maintain their own buffering and may read data from r
+// Block parsers maintain their own buffering and may read data from r
 // beyond the blocks requested.
-func NewParser(r io.Reader) *Parser {
-	return &Parser{
-		r: r,
-	}
+func NewBlockParser(r io.Reader) *BlockParser {
+	return &BlockParser{r: r}
 }
 
-// Parse parses an in-memory document and returns the sequence of blocks.
+// Parse parses an in-memory CommonMark document and returns its blocks.
+// As long as source does not contain NUL bytes,
+// the blocks will use the original byte slice as their source.
 func Parse(source []byte) []*RootBlock {
 	if bytes.IndexByte(source, 0) >= 0 {
 		// Contains one or more NUL bytes.
 		// Replace with Unicode replacement character.
 		source = bytes.ReplaceAll(source, []byte{0}, []byte("\ufffd"))
 	}
-	p := &Parser{
+	p := &BlockParser{
 		buf: source,
 		err: io.EOF,
 	}
@@ -81,9 +81,9 @@ func Parse(source []byte) []*RootBlock {
 
 // NextBlock reads the next top-level block in the document,
 // returning the first error encountered.
-// Blocks returned by NextBlock will typically contained [UnparsedKind] nodes for any text:
+// Blocks returned by NextBlock will typically contain [UnparsedKind] nodes for any text:
 // use [*InlineParser.Rewrite] to complete parsing.
-func (p *Parser) NextBlock() (*RootBlock, error) {
+func (p *BlockParser) NextBlock() (*RootBlock, error) {
 	// Keep going until we encounter a non-blank line.
 	var line []byte
 	for {
@@ -108,35 +108,35 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 			end: -1,
 		},
 	}
-	bp := newBlockParser(root, line)
-	hasText := openNewBlocks(bp, true)
+	lp := newLineParser(root, line)
+	hasText := openNewBlocks(lp, true)
 	if !root.isOpen() {
 		// Single-line block.
 		root.Source = p.consume()
 		return root, nil
 	}
 	if hasText {
-		addLineText(bp)
+		addLineText(lp)
 	}
 
 	// Parse subsequent lines.
 	for {
 		lineStart := p.parsePos
 		p.readline()
-		bp.reset(lineStart, p.buf[:p.parsePos:p.parsePos])
+		lp.reset(lineStart, p.buf[:p.parsePos:p.parsePos])
 
-		allMatched := descendOpenBlocks(bp)
+		allMatched := descendOpenBlocks(lp)
 		hasText := false
-		if bp.state != stateDescendTerminated {
-			hasText = openNewBlocks(bp, allMatched)
+		if lp.state != stateDescendTerminated {
+			hasText = openNewBlocks(lp, allMatched)
 		}
-		if bp.container == nil {
+		if lp.container == nil {
 			p.parsePos = root.end
 			root.Source = p.consume()
 			return root, nil
 		}
 		if hasText {
-			addLineText(bp)
+			addLineText(lp)
 		}
 	}
 }
@@ -151,7 +151,7 @@ func (p *Parser) NextBlock() (*RootBlock, error) {
 // in the CommonMark recommended parsing strategy.
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
-func descendOpenBlocks(p *blockParser) (allMatched bool) {
+func descendOpenBlocks(p *lineParser) (allMatched bool) {
 	p.container = nil
 	child := &p.root.Block
 	for {
@@ -187,7 +187,7 @@ func descendOpenBlocks(p *blockParser) (allMatched bool) {
 // in the CommonMark recommended parsing strategy.
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
-func openNewBlocks(p *blockParser, allMatched bool) (hasText bool) {
+func openNewBlocks(p *lineParser, allMatched bool) (hasText bool) {
 	if len(p.line) == 0 {
 		// Special case: EOF. Close the root block.
 		p.root.close(p.root.Source, p.lineStart)
@@ -239,7 +239,7 @@ openingLoop:
 	return true
 }
 
-func addLineText(p *blockParser) {
+func addLineText(p *lineParser) {
 	// Record whether a block ends in a blank line
 	// for the purpose of checking for list looseness.
 	isBlank := p.IsRestBlank()
@@ -309,7 +309,7 @@ func findTip(b *Block) *Block {
 // readline reads the next line of input, growing p.buf as necessary.
 // It will return a zero-length slice if and only if it has reached the end of input.
 // After calling readline, p.lineno will contain the current line's number.
-func (p *Parser) readline() []byte {
+func (p *BlockParser) readline() []byte {
 	const (
 		chunkSize    = 8 * 1024
 		maxBlockSize = 1024 * 1024
@@ -376,7 +376,7 @@ func (p *Parser) readline() []byte {
 	return line
 }
 
-func (p *Parser) consume() []byte {
+func (p *BlockParser) consume() []byte {
 	out := p.buf[:p.parsePos:p.parsePos]
 	p.offset += int64(p.parsePos)
 	p.buf = p.buf[p.parsePos:]

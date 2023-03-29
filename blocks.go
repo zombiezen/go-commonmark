@@ -23,7 +23,7 @@ import (
 
 // RootBlock represents a "top-level" block,
 // that is, a block whose parent is the document.
-// Root blocks store their Markdown source
+// Root blocks store their CommonMark source
 // and document position information.
 // All other position information in the tree
 // is relative to the beginning of the root block.
@@ -34,7 +34,7 @@ type RootBlock struct {
 	Block
 }
 
-// A Block is a structural element in a Markdown document.
+// A Block is a structural element in a CommonMark document.
 type Block struct {
 	kind     BlockKind
 	start    int
@@ -200,14 +200,14 @@ func (k BlockKind) IsHeading() bool {
 	return k == ATXHeadingKind || k == SetextHeadingKind
 }
 
-// blockParser is a cursor on a line of text,
+// lineParser is a cursor on a line of text,
 // used while splitting a document into blocks.
 //
-// Exported methods on blockParser
-// represent the contract between Parser and the rules.
-// In the future, blockParser could be exported to permit custom block rules,
+// Exported methods on lineParser
+// represent the contract between BlockParser and the rules.
+// In the future, lineParser could be exported to permit custom block rules,
 // but it's unclear how often this is needed.
-type blockParser struct {
+type lineParser struct {
 	root      *RootBlock
 	container *Block // nil represents the document
 
@@ -224,7 +224,7 @@ type blockParser struct {
 	currentIndent       int // indentation of current list item being true
 }
 
-// Block parser states.
+// Line parser states.
 const (
 	// stateOpening is the initial state used in [openNewBlocks].
 	stateOpening = iota
@@ -234,25 +234,25 @@ const (
 	stateOpenMatched
 	// stateLineConsumed is a terminal state used in [openNewBlocks].
 	// It is entered from [stateOpening]
-	// after [*blockParser.ConsumeLine] has been called.
+	// after [*lineParser.ConsumeLine] has been called.
 	stateLineConsumed
 	// stateDescending is the initial state used in [descendOpenBlocks].
 	// No modification of the AST is permitted in this state.
 	stateDescending
 	// stateDescendTerminated is a terminal state used in [descendOpenBlocks].
 	// It is entered from [stateDescending]
-	// after [*blockParser.ConsumeLine] has been called.
+	// after [*lineParser.ConsumeLine] has been called.
 	// No modification of the AST is permitted in this state.
 	stateDescendTerminated
 )
 
-func newBlockParser(root *RootBlock, line []byte) *blockParser {
-	p := &blockParser{root: root}
+func newLineParser(root *RootBlock, line []byte) *lineParser {
+	p := &lineParser{root: root}
 	p.reset(0, line)
 	return p
 }
 
-func (p *blockParser) reset(lineStart int, newSource []byte) {
+func (p *lineParser) reset(lineStart int, newSource []byte) {
 	p.lineStart = lineStart
 	p.root.Source = newSource
 	p.line = newSource[lineStart:]
@@ -262,7 +262,7 @@ func (p *blockParser) reset(lineStart int, newSource []byte) {
 	p.clearMatchData()
 }
 
-func (p *blockParser) setupMatch(child *Block) {
+func (p *lineParser) setupMatch(child *Block) {
 	p.state = stateDescending
 	p.currentIndent = child.indent
 	switch child.Kind() {
@@ -274,7 +274,7 @@ func (p *blockParser) setupMatch(child *Block) {
 	}
 }
 
-func (p *blockParser) clearMatchData() {
+func (p *lineParser) clearMatchData() {
 	p.currentIndent = math.MaxInt
 	p.listItemHasChildren = false
 	p.fenceChar = 0
@@ -283,18 +283,18 @@ func (p *blockParser) clearMatchData() {
 
 // BytesAfterIndent returns the bytes
 // after any indentation immediately following the cursor.
-func (p *blockParser) BytesAfterIndent() []byte {
+func (p *lineParser) BytesAfterIndent() []byte {
 	return bytes.TrimLeft(p.line[p.i:], " \t")
 }
 
 // IsRestBlank reports whether the rest of the line is blank.
-func (p *blockParser) IsRestBlank() bool {
+func (p *lineParser) IsRestBlank() bool {
 	return isBlankLine(p.line[p.i:])
 }
 
 // Advance advances the parser by n bytes.
 // It panics if n is greater than the number of bytes remaining in the line.
-func (p *blockParser) Advance(n int) {
+func (p *lineParser) Advance(n int) {
 	if n < 0 {
 		panic("negative length")
 	}
@@ -317,7 +317,7 @@ func (p *blockParser) Advance(n int) {
 	p.updateTabRemaining()
 }
 
-func (p *blockParser) updateTabRemaining() {
+func (p *lineParser) updateTabRemaining() {
 	if p.i < len(p.line) && p.line[p.i] == '\t' {
 		p.tabRemaining = int8(columnWidth(p.col, p.line[p.i:p.i+1]))
 	} else {
@@ -328,7 +328,7 @@ func (p *blockParser) updateTabRemaining() {
 // ConsumeLine advances the cursor past the end of the line.
 // This will skip processing line text,
 // and additionally close the block when called during block matching.
-func (p *blockParser) ConsumeLine() {
+func (p *lineParser) ConsumeLine() {
 	p.Advance(len(p.line) - p.i)
 	switch p.state {
 	case stateOpening, stateOpenMatched:
@@ -340,7 +340,7 @@ func (p *blockParser) ConsumeLine() {
 
 // Indent returns the number of columns of whitespace
 // present after the cursor's position.
-func (p *blockParser) Indent() int {
+func (p *lineParser) Indent() int {
 	if p.i >= len(p.line) {
 		return 0
 	}
@@ -359,7 +359,7 @@ func (p *blockParser) Indent() int {
 
 // ConsumeIndent advances the parser by n columns of whitespace.
 // It panics if n is greater than bp.Indent().
-func (p *blockParser) ConsumeIndent(n int) {
+func (p *lineParser) ConsumeIndent(n int) {
 	for n > 0 {
 		if p.state == stateOpening {
 			p.state = stateOpenMatched
@@ -388,7 +388,7 @@ func (p *blockParser) ConsumeIndent(n int) {
 // ContainerKind returns the kind of the current block.
 // During block start checks, this will be the parent of block being considered.
 // During [blockRule] matches, this will be the same as the rule's kind.
-func (p *blockParser) ContainerKind() BlockKind {
+func (p *lineParser) ContainerKind() BlockKind {
 	if p.container == nil {
 		return documentKind
 	}
@@ -396,7 +396,7 @@ func (p *blockParser) ContainerKind() BlockKind {
 }
 
 // TipKind returns the kind of the deepest open block.
-func (p *blockParser) TipKind() BlockKind {
+func (p *lineParser) TipKind() BlockKind {
 	tip := findTip(&p.root.Block)
 	if tip == nil {
 		return documentKind
@@ -404,7 +404,7 @@ func (p *blockParser) TipKind() BlockKind {
 	return tip.kind
 }
 
-func (p *blockParser) ContainerListDelim() byte {
+func (p *lineParser) ContainerListDelim() byte {
 	if k := p.ContainerKind(); k != ListKind && k != ListItemKind {
 		return 0
 	}
@@ -413,29 +413,29 @@ func (p *blockParser) ContainerListDelim() byte {
 
 // CurrentBlockIndent returns the indent value assigned to the current block.
 // Only valid while matching continuation lines.
-func (p *blockParser) CurrentBlockIndent() int {
+func (p *lineParser) CurrentBlockIndent() int {
 	return p.currentIndent
 }
 
-func (p *blockParser) CurrentItemHasChildren() bool {
+func (p *lineParser) CurrentItemHasChildren() bool {
 	return p.listItemHasChildren
 }
 
 // CurrentCodeFence returns the character and number of characters
 // used to start the code fence being currently matched.
-func (p *blockParser) CurrentCodeFence() (c byte, n int) {
+func (p *lineParser) CurrentCodeFence() (c byte, n int) {
 	return p.fenceChar, p.fenceCharCount
 }
 
 // OpenBlock starts a new block at the current position.
-func (p *blockParser) OpenBlock(kind BlockKind) {
+func (p *lineParser) OpenBlock(kind BlockKind) {
 	if kind == ListKind || kind == ListItemKind || kind == FencedCodeBlockKind || kind.IsHeading() {
 		panic("OpenBlock cannot be called with this kind")
 	}
 	p.openBlock(kind)
 }
 
-func (p *blockParser) OpenListBlock(kind BlockKind, delim byte) {
+func (p *lineParser) OpenListBlock(kind BlockKind, delim byte) {
 	if kind != ListKind && kind != ListItemKind {
 		panic("OpenListBlock must be called with ListKind or ListItemKind")
 	}
@@ -445,7 +445,7 @@ func (p *blockParser) OpenListBlock(kind BlockKind, delim byte) {
 	}
 }
 
-func (p *blockParser) OpenFencedCodeBlock(fenceChar byte, numChars int) {
+func (p *lineParser) OpenFencedCodeBlock(fenceChar byte, numChars int) {
 	p.openBlock(FencedCodeBlockKind)
 	if p.container != nil {
 		p.container.char = fenceChar
@@ -453,7 +453,7 @@ func (p *blockParser) OpenFencedCodeBlock(fenceChar byte, numChars int) {
 	}
 }
 
-func (p *blockParser) OpenHeadingBlock(kind BlockKind, level int) {
+func (p *lineParser) OpenHeadingBlock(kind BlockKind, level int) {
 	if !kind.IsHeading() {
 		panic("OpenHeadingBlock must be called with ATXHeadingKind or SetextHeadingKind")
 	}
@@ -463,7 +463,7 @@ func (p *blockParser) OpenHeadingBlock(kind BlockKind, level int) {
 	}
 }
 
-func (p *blockParser) openBlock(kind BlockKind) {
+func (p *lineParser) openBlock(kind BlockKind) {
 	switch p.state {
 	case stateDescending, stateDescendTerminated:
 		panic("OpenBlock cannot be called in this context")
@@ -509,7 +509,7 @@ func (p *blockParser) openBlock(kind BlockKind) {
 }
 
 // SetContainerIndent sets the container's indentation.
-func (p *blockParser) SetContainerIndent(indent int) {
+func (p *lineParser) SetContainerIndent(indent int) {
 	switch p.state {
 	case stateOpening:
 		panic("SetListItemIndent cannot be called before a match")
@@ -526,7 +526,7 @@ func (p *blockParser) SetContainerIndent(indent int) {
 
 // CollectInline adds a new [UnparsedKind] inline to the current block,
 // starting at the current position and ending after n bytes.
-func (p *blockParser) CollectInline(kind InlineKind, n int) {
+func (p *lineParser) CollectInline(kind InlineKind, n int) {
 	switch p.state {
 	case stateDescending, stateDescendTerminated:
 		panic("CollectInline cannot be called in this context")
@@ -551,7 +551,7 @@ func (p *blockParser) CollectInline(kind InlineKind, n int) {
 }
 
 // EndBlock ends a block at the current position.
-func (p *blockParser) EndBlock() {
+func (p *lineParser) EndBlock() {
 	switch p.state {
 	case stateDescending, stateDescendTerminated:
 		panic("EndBlock cannot be called in this context")
@@ -572,9 +572,9 @@ const codeBlockIndentLimit = 4
 
 const blockQuotePrefix = ">"
 
-var blockStarts = []func(*blockParser){
+var blockStarts = []func(*lineParser){
 	// Block quote.
-	func(p *blockParser) {
+	func(p *lineParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
 			return
@@ -592,7 +592,7 @@ var blockStarts = []func(*blockParser){
 	},
 
 	// ATX heading.
-	func(p *blockParser) {
+	func(p *lineParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
 			return
@@ -611,7 +611,7 @@ var blockStarts = []func(*blockParser){
 	},
 
 	// Fenced code block.
-	func(p *blockParser) {
+	func(p *lineParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
 			return
@@ -632,7 +632,7 @@ var blockStarts = []func(*blockParser){
 	},
 
 	// Thematic break.
-	func(p *blockParser) {
+	func(p *lineParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
 			return
@@ -650,7 +650,7 @@ var blockStarts = []func(*blockParser){
 	},
 
 	// List item.
-	func(p *blockParser) {
+	func(p *lineParser) {
 		indent := p.Indent()
 		if indent >= codeBlockIndentLimit {
 			return
@@ -689,7 +689,7 @@ var blockStarts = []func(*blockParser){
 	},
 
 	// Indented code block.
-	func(p *blockParser) {
+	func(p *lineParser) {
 		if p.Indent() < codeBlockIndentLimit || p.IsRestBlank() || p.TipKind() == ParagraphKind {
 			return
 		}
@@ -699,7 +699,7 @@ var blockStarts = []func(*blockParser){
 }
 
 type blockRule struct {
-	match        func(*blockParser) bool
+	match        func(*lineParser) bool
 	onClose      func(source []byte, block *Block)
 	canContain   func(childKind BlockKind) bool
 	acceptsLines bool
@@ -707,11 +707,11 @@ type blockRule struct {
 
 var blocks = map[BlockKind]blockRule{
 	documentKind: {
-		match:      func(*blockParser) bool { return true },
+		match:      func(*lineParser) bool { return true },
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	ListKind: {
-		match:      func(*blockParser) bool { return true },
+		match:      func(*lineParser) bool { return true },
 		canContain: func(childKind BlockKind) bool { return childKind == ListItemKind },
 		onClose: func(source []byte, block *Block) {
 			endsWithBlankLine := func(block *Block) bool {
@@ -752,7 +752,7 @@ var blocks = map[BlockKind]blockRule{
 		},
 	},
 	ListItemKind: {
-		match: func(p *blockParser) bool {
+		match: func(p *lineParser) bool {
 			switch {
 			case p.IsRestBlank():
 				if !p.CurrentItemHasChildren() {
@@ -771,7 +771,7 @@ var blocks = map[BlockKind]blockRule{
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	BlockQuoteKind: {
-		match: func(p *blockParser) bool {
+		match: func(p *lineParser) bool {
 			indent := p.Indent()
 			if indent >= codeBlockIndentLimit {
 				return false
@@ -789,7 +789,7 @@ var blocks = map[BlockKind]blockRule{
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },
 	},
 	FencedCodeBlockKind: {
-		match: func(p *blockParser) bool {
+		match: func(p *lineParser) bool {
 			lineIndent := p.Indent()
 			if lineIndent < codeBlockIndentLimit {
 				startChar, startCharCount := p.CurrentCodeFence()
@@ -810,7 +810,7 @@ var blocks = map[BlockKind]blockRule{
 		acceptsLines: true,
 	},
 	IndentedCodeBlockKind: {
-		match: func(p *blockParser) bool {
+		match: func(p *lineParser) bool {
 			indent := p.Indent()
 			if indent < codeBlockIndentLimit {
 				if !p.IsRestBlank() {
@@ -836,7 +836,7 @@ var blocks = map[BlockKind]blockRule{
 		acceptsLines: true,
 	},
 	ParagraphKind: {
-		match: func(p *blockParser) bool {
+		match: func(p *lineParser) bool {
 			return !p.IsRestBlank()
 		},
 		acceptsLines: true,

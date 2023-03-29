@@ -1,5 +1,5 @@
 {
-  description = "Markdown package for Go";
+  description = "CommonMark package for Go";
 
   inputs = {
     nixpkgs.url = "nixpkgs";

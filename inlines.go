@@ -21,7 +21,7 @@ import (
 	"strings"
 )
 
-// Inline represents Markdown content elements like text, links, or emphasis.
+// Inline represents CommonMark content elements like text, links, or emphasis.
 type Inline struct {
 	kind     InlineKind
 	start    int
