@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"unicode"
 )
 
 // tabStopSize is the multiple of columns that a [tab] advances to.
@@ -440,6 +441,23 @@ func isASCIIPunctuation(c byte) bool {
 		':' <= c && c <= '@' ||
 		'[' <= c && c <= '`' ||
 		'{' <= c && c <= '~'
+}
+
+// isUnicodeWhitespace reports whether the code point is a [Unicode whitespace character].
+//
+// [Unicode whitespace character]: https://spec.commonmark.org/0.30/#unicode-whitespace-character
+func isUnicodeWhitespace(c rune) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || unicode.Is(unicode.Zs, c)
+}
+
+// isUnicodePunctuation reports whether the code point is a [Unicode punctuation character].
+//
+// [Unicode punctuation character]: https://spec.commonmark.org/0.30/#unicode-punctuation-character
+func isUnicodePunctuation(c rune) bool {
+	if c < 0x80 {
+		return isASCIIPunctuation(byte(c))
+	}
+	return unicode.In(c, unicode.Pc, unicode.Pd, unicode.Pe, unicode.Pf, unicode.Pi, unicode.Po, unicode.Ps)
 }
 
 // isEndEscaped reports whether s ends with an odd number of backslashes.

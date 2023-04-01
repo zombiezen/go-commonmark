@@ -125,6 +125,18 @@ func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 		dst = append(dst, '\n')
 	case HardLineBreakKind:
 		dst = append(dst, "<br>\n"...)
+	case EmphasisKind:
+		dst = append(dst, "<em>"...)
+		for _, c := range inline.children {
+			dst = appendInlineHTML(dst, source, c)
+		}
+		dst = append(dst, "</em>"...)
+	case StrongKind:
+		dst = append(dst, "<strong>"...)
+		for _, c := range inline.children {
+			dst = appendInlineHTML(dst, source, c)
+		}
+		dst = append(dst, "</strong>"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			dst = append(dst, ' ')

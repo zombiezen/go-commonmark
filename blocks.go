@@ -835,6 +835,9 @@ var blocks = map[BlockKind]blockRule{
 		},
 		acceptsLines: true,
 	},
+	ATXHeadingKind: {
+		acceptsLines: true,
+	},
 	ParagraphKind: {
 		match: func(p *lineParser) bool {
 			return !p.IsRestBlank()
