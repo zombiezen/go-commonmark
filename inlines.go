@@ -187,7 +187,7 @@ func (p *InlineParser) parse(dst []Node, source []byte, container *Block, unpars
 						start: plainStart,
 						end:   i,
 					})
-					i = p.parseEmphasisDelimiter(state, i)
+					i = p.parseDelimiterRun(state, i)
 					plainStart = i
 				case '\\':
 					if k := state.container.Inline().Kind(); k == CodeSpanKind || k == AutolinkKind || k == RawHTMLKind {
@@ -252,7 +252,7 @@ func (p *InlineParser) parseBackslash(state *inlineState, start int) (end int) {
 	return end
 }
 
-func (p *InlineParser) parseEmphasisDelimiter(state *inlineState, start int) (end int) {
+func (p *InlineParser) parseDelimiterRun(state *inlineState, start int) (end int) {
 	node := &Inline{
 		kind:  TextKind,
 		start: start,
