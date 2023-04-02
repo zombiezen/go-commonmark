@@ -46,6 +46,7 @@ var supportedSections = map[string]struct{}{
 	"Block quotes":                 {},
 	"List items":                   {},
 	"Lists":                        {},
+	"Inlines":                      {},
 	"Code spans":                   {},
 	"Emphasis and strong emphasis": {},
 }
