@@ -995,12 +995,7 @@ func parseCodeFence(line []byte) codeFence {
 		return codeFence{infoStart: -1, infoEnd: -1}
 	}
 	for i := f.n; i < len(line) && f.infoStart < 0; i++ {
-		switch c := line[i]; {
-		case c == '`' && f.char == '`':
-			// "If the info string comes after a backtick fence,
-			// it may not contain any backtick characters."
-			return codeFence{infoStart: -1, infoEnd: -1}
-		case c != ' ' && c != '\t' && c != '\r' && c != '\n':
+		if c := line[i]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
 			f.infoStart = i
 		}
 	}
@@ -1009,6 +1004,16 @@ func parseCodeFence(line []byte) codeFence {
 		for f.infoEnd = len(line); f.infoEnd > f.infoStart; f.infoEnd-- {
 			if c := line[f.infoEnd-1]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
 				break
+			}
+		}
+
+		// "If the info string comes after a backtick fence,
+		// it may not contain any backtick characters."
+		if f.char == '`' {
+			for i := f.infoStart; i < f.infoEnd; i++ {
+				if line[i] == '`' {
+					return codeFence{infoStart: -1, infoEnd: -1}
+				}
 			}
 		}
 	}

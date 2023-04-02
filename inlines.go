@@ -172,37 +172,90 @@ func (p *InlineParser) parse(dst []Node, source []byte, container *Block, unpars
 		container: container.AsNode(),
 		parentMap: make(map[*Inline]Node),
 	}
-	for i, u := range unparsed {
+	for unparsedIndex := 0; unparsedIndex < len(unparsed); unparsedIndex++ {
+		u := unparsed[unparsedIndex]
 		switch u.Inline().Kind() {
 		case 0:
 		case UnparsedKind:
 			state.spanEnd = u.Inline().End()
-			state.isLastSpan = i == len(unparsed)-1
+			state.isLastSpan = unparsedIndex == len(unparsed)-1
 			plainStart := u.Inline().Start()
-			for i := plainStart; i < state.spanEnd; {
-				switch source[i] {
+			for pos := plainStart; pos < state.spanEnd; {
+				switch source[pos] {
 				case '*', '_':
 					state.add(&Inline{
 						kind:  TextKind,
 						start: plainStart,
-						end:   i,
+						end:   pos,
 					})
-					i = p.parseDelimiterRun(state, i)
-					plainStart = i
+					pos = p.parseDelimiterRun(state, pos)
+					plainStart = pos
+				case '`':
+					if cs := p.parseCodeSpan(source, unparsed[unparsedIndex:], pos); cs.end >= 0 {
+						state.add(&Inline{
+							kind:  TextKind,
+							start: plainStart,
+							end:   cs.start,
+						})
+
+						codeSpanNode := &Inline{
+							kind:  CodeSpanKind,
+							start: cs.start,
+							end:   cs.end,
+						}
+						if cs.nodeCount == 0 {
+							codeSpanNode.children = []*Inline{{
+								kind:  TextKind,
+								start: cs.contentStart,
+								end:   cs.contentEnd,
+							}}
+						} else {
+							codeSpanNode.children = append(codeSpanNode.children, &Inline{
+								kind:  TextKind,
+								start: cs.contentStart,
+								end:   u.Inline().End(),
+							})
+							for i := 0; i < cs.nodeCount-1; i++ {
+								unparsedIndex++
+								u = unparsed[unparsedIndex]
+								codeSpanNode.children = append(codeSpanNode.children, &Inline{
+									kind:  TextKind,
+									start: u.Inline().Start(),
+									end:   u.Inline().End(),
+								})
+							}
+							unparsedIndex++
+							u = unparsed[unparsedIndex]
+							codeSpanNode.children = append(codeSpanNode.children, &Inline{
+								kind:  TextKind,
+								start: u.Inline().Start(),
+								end:   cs.contentEnd,
+							})
+						}
+						state.add(codeSpanNode)
+
+						pos = cs.end
+						plainStart = pos
+						state.spanEnd = u.Inline().End()
+						state.isLastSpan = unparsedIndex == len(unparsed)-1
+					} else {
+						// Advance past literal backtick string.
+						pos = cs.contentStart
+					}
 				case '\\':
 					if k := state.container.Inline().Kind(); k == CodeSpanKind || k == AutolinkKind || k == RawHTMLKind {
-						i++
+						pos++
 					} else {
 						state.add(&Inline{
 							kind:  TextKind,
 							start: plainStart,
-							end:   i,
+							end:   pos,
 						})
-						i = p.parseBackslash(state, i)
-						plainStart = i
+						pos = p.parseBackslash(state, pos)
+						plainStart = pos
 					}
 				default:
-					i++
+					pos++
 				}
 			}
 			state.add(&Inline{
@@ -390,6 +443,63 @@ closerLoop:
 
 	// After we’re done, we remove all delimiters above stack_bottom from the delimiter stack.
 	state.stack = removeFromDelimiterStack(state.stack, stackBottom, len(state.stack))
+}
+
+type codeSpan struct {
+	nodeCount    int
+	start        int
+	contentStart int
+	contentEnd   int
+	end          int
+}
+
+func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) codeSpan {
+	result := codeSpan{
+		start:        start,
+		contentStart: start,
+		contentEnd:   -1,
+		end:          -1,
+	}
+	backtickLength := 0
+	for result.contentStart < unparsed[0].Inline().End() && source[result.contentStart] == '`' {
+		backtickLength++
+		result.contentStart++
+	}
+
+	result.contentEnd = result.contentStart
+	for {
+		if result.contentEnd >= unparsed[result.nodeCount].Inline().End() {
+			for {
+				result.nodeCount++
+				if result.nodeCount >= len(unparsed) {
+					// Hit end of input before encountering end of code span.
+					result.contentEnd = -1
+					return result
+				}
+				if unparsed[result.nodeCount].Inline().Kind() == UnparsedKind {
+					break
+				}
+			}
+			result.contentEnd = unparsed[result.nodeCount].Inline().Start()
+		}
+
+		if source[result.contentEnd] != '`' {
+			result.contentEnd++
+			continue
+		}
+		currentRunLength := 1
+		peekPos := result.contentEnd + 1
+		for peekPos < unparsed[result.nodeCount].Inline().End() && source[peekPos] == '`' {
+			currentRunLength++
+			peekPos++
+		}
+		if currentRunLength == backtickLength {
+			result.end = peekPos
+			return result
+		}
+
+		result.contentEnd = peekPos
+	}
 }
 
 // parseInfoString builds a [InfoStringKind] inline span from the given text,

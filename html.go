@@ -137,6 +137,12 @@ func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 			dst = appendInlineHTML(dst, source, c)
 		}
 		dst = append(dst, "</strong>"...)
+	case CodeSpanKind:
+		dst = append(dst, "<code>"...)
+		for _, c := range inline.children {
+			dst = appendInlineHTML(dst, source, c)
+		}
+		dst = append(dst, "</code>"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			dst = append(dst, ' ')
