@@ -37,6 +37,7 @@ import (
 var supportedSections = map[string]struct{}{
 	"Tabs":                         {},
 	"Backslash escapes":            {},
+	"Precedence":                   {},
 	"Thematic breaks":              {},
 	"ATX headings":                 {},
 	"Indented code blocks":         {},
