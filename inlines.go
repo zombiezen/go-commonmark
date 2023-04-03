@@ -197,45 +197,11 @@ func (p *InlineParser) parse(dst []Node, source []byte, container *Block, unpars
 							start: plainStart,
 							end:   cs.start,
 						})
-
-						codeSpanNode := &Inline{
-							kind:  CodeSpanKind,
-							start: cs.start,
-							end:   cs.end,
-						}
-						if cs.nodeCount == 0 {
-							codeSpanNode.children = []*Inline{{
-								kind:  TextKind,
-								start: cs.contentStart,
-								end:   cs.contentEnd,
-							}}
-						} else {
-							codeSpanNode.children = append(codeSpanNode.children, &Inline{
-								kind:  TextKind,
-								start: cs.contentStart,
-								end:   u.Inline().End(),
-							})
-							for i := 0; i < cs.nodeCount-1; i++ {
-								unparsedIndex++
-								u = unparsed[unparsedIndex]
-								codeSpanNode.children = append(codeSpanNode.children, &Inline{
-									kind:  TextKind,
-									start: u.Inline().Start(),
-									end:   u.Inline().End(),
-								})
-							}
-							unparsedIndex++
-							u = unparsed[unparsedIndex]
-							codeSpanNode.children = append(codeSpanNode.children, &Inline{
-								kind:  TextKind,
-								start: u.Inline().Start(),
-								end:   cs.contentEnd,
-							})
-						}
-						state.add(codeSpanNode)
+						p.collectCodeSpan(state, cs, unparsed, &unparsedIndex)
 
 						pos = cs.end
 						plainStart = pos
+						u = unparsed[unparsedIndex]
 						state.spanEnd = u.Inline().End()
 						state.isLastSpan = unparsedIndex == len(unparsed)-1
 					} else {
@@ -410,19 +376,19 @@ closerLoop:
 			}
 
 			// Remove any delimiters between the opener and closer from the delimiter stack.
-			state.stack = removeFromDelimiterStack(state.stack, openerIndex+1, currentPosition)
+			state.stack = deleteDelimiterStack(state.stack, openerIndex+1, currentPosition)
 			currentPosition = openerIndex + 1
 
 			// If either the opening or the closing text nodes became empty,
 			// remove them from the tree.
 			if opener.start == opener.end {
 				state.remove(opener)
-				state.stack = removeFromDelimiterStack(state.stack, openerIndex, openerIndex+1)
+				state.stack = deleteDelimiterStack(state.stack, openerIndex, openerIndex+1)
 				currentPosition--
 			}
 			if closer.start == closer.end {
 				state.remove(closer)
-				state.stack = removeFromDelimiterStack(state.stack, currentPosition, currentPosition+1)
+				state.stack = deleteDelimiterStack(state.stack, currentPosition, currentPosition+1)
 			}
 		} else {
 			// We know that there are no openers for this kind of closer up to and including this point,
@@ -442,7 +408,7 @@ closerLoop:
 	}
 
 	// After we’re done, we remove all delimiters above stack_bottom from the delimiter stack.
-	state.stack = removeFromDelimiterStack(state.stack, stackBottom, len(state.stack))
+	state.stack = deleteDelimiterStack(state.stack, stackBottom, len(state.stack))
 }
 
 type codeSpan struct {
@@ -500,6 +466,126 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) 
 
 		result.contentEnd = peekPos
 	}
+}
+
+func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan, unparsed []Node, unparsedIndex *int) {
+	codeSpanNode := &Inline{
+		kind:  CodeSpanKind,
+		start: cs.start,
+		end:   cs.end,
+	}
+	addSpan := func(child *Inline) {
+		spanText := state.source[child.Start():child.End()]
+		trim := 0
+		switch {
+		case len(spanText) >= 2 && spanText[len(spanText)-2] == '\r' && spanText[len(spanText)-1] == '\n':
+			trim = 2
+		case len(spanText) >= 1 && (spanText[len(spanText)-1] == '\n' || spanText[len(spanText)-1] == '\r'):
+			trim = 1
+		}
+		child.end -= trim
+		if child.start < child.end {
+			codeSpanNode.children = append(codeSpanNode.children, child)
+		}
+		if trim > 0 {
+			codeSpanNode.children = append(codeSpanNode.children, &Inline{
+				kind:   IndentKind,
+				start:  child.end,
+				end:    child.end + trim,
+				indent: 1,
+			})
+		}
+	}
+
+	if cs.nodeCount == 0 {
+		addSpan(&Inline{
+			kind:  TextKind,
+			start: cs.contentStart,
+			end:   cs.contentEnd,
+		})
+	} else {
+		addSpan(&Inline{
+			kind:  TextKind,
+			start: cs.contentStart,
+			end:   unparsed[*unparsedIndex].Inline().End(),
+		})
+		for i := 0; i < cs.nodeCount-1; i++ {
+			*unparsedIndex++
+			u := unparsed[*unparsedIndex]
+			addSpan(&Inline{
+				kind:  TextKind,
+				start: u.Inline().Start(),
+				end:   u.Inline().End(),
+			})
+		}
+		*unparsedIndex++
+		addSpan(&Inline{
+			kind:  TextKind,
+			start: unparsed[*unparsedIndex].Inline().Start(),
+			end:   cs.contentEnd,
+		})
+	}
+
+	codeSpanNode.children = p.stripCodeSpanSpace(state, codeSpanNode.children)
+	state.add(codeSpanNode)
+}
+
+func (p *InlineParser) stripCodeSpanSpace(state *inlineState, slice []*Inline) []*Inline {
+	foundNonSpace := false
+	for _, inline := range slice {
+		if inline.Kind() != IndentKind && !isOnlySpaces(state.source[inline.Start():inline.End()]) {
+			foundNonSpace = true
+			break
+		}
+	}
+	if !foundNonSpace {
+		return slice
+	}
+
+	first, last := slice[0], slice[len(slice)-1]
+	if !(first.Kind() == IndentKind || state.source[first.Start()] == ' ') ||
+		!(last.Kind() == IndentKind || state.source[last.End()-1] == ' ') {
+		return slice
+	}
+
+	if first.Kind() == IndentKind {
+		first.indent--
+		if first.indent == 0 {
+			delete(state.parentMap, first)
+			slice = deleteInlineNodes(slice, 0, 1)
+		}
+	} else {
+		first.start++
+		if first.start == first.end {
+			delete(state.parentMap, first)
+			slice = deleteInlineNodes(slice, 0, 1)
+		}
+	}
+
+	if last.Kind() == IndentKind {
+		last.indent--
+		if last.indent == 0 {
+			delete(state.parentMap, last)
+			slice = deleteInlineNodes(slice, len(slice)-1, len(slice))
+		}
+	} else {
+		last.end--
+		if last.start == last.end {
+			delete(state.parentMap, last)
+			slice = deleteInlineNodes(slice, len(slice)-1, len(slice))
+		}
+	}
+
+	return slice
+}
+
+func isOnlySpaces(line []byte) bool {
+	for _, c := range line {
+		if c != ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 // parseInfoString builds a [InfoStringKind] inline span from the given text,
@@ -591,8 +677,7 @@ func (state *inlineState) wrap(kind InlineKind, startNode, endNode *Inline) {
 			copy(inlineParent.children[endIndex+1:], inlineParent.children[endIndex:])
 			inlineParent.children[startIndex] = newNode
 		} else {
-			copy(inlineParent.children[startIndex+1:], inlineParent.children[endIndex:])
-			inlineParent.children = inlineParent.children[:len(inlineParent.children)-(endIndex-startIndex-1)]
+			inlineParent.children = deleteInlineNodes(inlineParent.children, startIndex+1, endIndex)
 		}
 		inlineParent.children[startIndex] = newNode
 	} else {
@@ -644,11 +729,7 @@ func (state *inlineState) remove(node *Inline) {
 				n++
 			}
 		}
-		clear := inline.children[n:]
-		for i := range clear {
-			clear[i] = nil
-		}
-		inline.children = inline.children[:n]
+		inline.children = deleteInlineNodes(inline.children, n, len(inline.children))
 	} else {
 		n := 0
 		for _, c := range state.dst {
@@ -665,6 +746,16 @@ func (state *inlineState) remove(node *Inline) {
 	}
 
 	delete(state.parentMap, node)
+}
+
+func deleteInlineNodes(slice []*Inline, i, j int) []*Inline {
+	copy(slice[i:], slice[j:])
+	newEnd := len(slice) - (j - i)
+	clear := slice[newEnd:]
+	for ci := range clear {
+		clear[ci] = nil
+	}
+	return slice[:newEnd]
 }
 
 type delimiterStackElement struct {
@@ -706,7 +797,7 @@ func isEmphasisDelimiterMatch(open, close delimiterStackElement) bool {
 			open.n%3 == 0 && close.n%3 == 0)
 }
 
-func removeFromDelimiterStack(stack []delimiterStackElement, i, j int) []delimiterStackElement {
+func deleteDelimiterStack(stack []delimiterStackElement, i, j int) []delimiterStackElement {
 	copy(stack[i:], stack[j:])
 	newEnd := len(stack) - (j - i)
 	clear := stack[newEnd:]
