@@ -72,7 +72,7 @@ func (inline *Inline) IndentWidth() int {
 // Text converts a non-container inline node into a string.
 func (inline *Inline) Text(source []byte) string {
 	switch inline.Kind() {
-	case TextKind, ListMarkerKind:
+	case TextKind:
 		return string(source[inline.Start():inline.End()])
 	case SoftLineBreakKind, HardLineBreakKind:
 		return "\n"
@@ -85,8 +85,8 @@ func (inline *Inline) Text(source []byte) string {
 	case InfoStringKind:
 		sb := new(strings.Builder)
 		sb.Grow(inline.End() - inline.Start())
-		for _, child := range inline.Children() {
-			switch child.Kind() {
+		for i, n := 0, inline.ChildCount(); i < n; i++ {
+			switch child := inline.Child(i); child.Kind() {
 			case TextKind:
 				sb.Write(source[child.Start():child.End()])
 			}
@@ -97,13 +97,18 @@ func (inline *Inline) Text(source []byte) string {
 	}
 }
 
-// Children returns children of the node.
-// Calling Children on nil returns a nil slice.
-func (inline *Inline) Children() []*Inline {
+// ChildCount returns the number of children the node has.
+// Calling ChildCount on nil returns 0.
+func (inline *Inline) ChildCount() int {
 	if inline == nil {
-		return nil
+		return 0
 	}
-	return inline.children
+	return len(inline.children)
+}
+
+// Child returns the i'th child of the node.
+func (inline *Inline) Child(i int) *Inline {
+	return inline.children[i]
 }
 
 // InlineKind is an enumeration of values returned by [*Inline.Kind].
@@ -114,7 +119,6 @@ const (
 	SoftLineBreakKind
 	HardLineBreakKind
 	IndentKind
-	ListMarkerKind
 	InfoStringKind
 	EmphasisKind
 	StrongKind
@@ -139,13 +143,12 @@ func (p *InlineParser) Rewrite(root *RootBlock) {
 	for len(stack) > 0 {
 		curr := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if blocks[curr.Kind()].acceptsLines {
-			if hasUnparsed(curr) {
-				curr.children = p.parse(nil, root.Source, curr, curr.Children())
-			}
-		} else {
-			for i := len(curr.children) - 1; i >= 0; i-- {
-				if b := curr.children[i].Block(); b != nil {
+		switch {
+		case len(curr.inlineChildren) > 0 && hasUnparsed(curr):
+			curr.inlineChildren = p.parse(root.Source, curr)
+		case len(curr.blockChildren) > 0:
+			for i := len(curr.blockChildren) - 1; i >= 0; i-- {
+				if b := curr.blockChildren[i]; b != nil {
 					stack = append(stack, b)
 				}
 			}
@@ -154,32 +157,34 @@ func (p *InlineParser) Rewrite(root *RootBlock) {
 }
 
 type inlineState struct {
-	dst        []Node
 	source     []byte
 	spanEnd    int
 	isLastSpan bool
 	blockKind  BlockKind
-	container  Node
+	container  *Inline
 	stack      []delimiterStackElement
-	parentMap  map[*Inline]Node
+	parentMap  map[*Inline]*Inline
 }
 
-func (p *InlineParser) parse(dst []Node, source []byte, container *Block, unparsed []Node) []Node {
+func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
+	dummy := &Inline{
+		start: container.start,
+		end:   container.end,
+	}
 	state := &inlineState{
-		dst:       dst,
 		source:    source,
 		blockKind: container.Kind(),
-		container: container.AsNode(),
-		parentMap: make(map[*Inline]Node),
+		container: dummy,
+		parentMap: make(map[*Inline]*Inline),
 	}
-	for unparsedIndex := 0; unparsedIndex < len(unparsed); unparsedIndex++ {
-		u := unparsed[unparsedIndex]
-		switch u.Inline().Kind() {
+	for unparsedIndex := 0; unparsedIndex < len(container.inlineChildren); unparsedIndex++ {
+		u := container.inlineChildren[unparsedIndex]
+		switch u.Kind() {
 		case 0:
 		case UnparsedKind:
-			state.spanEnd = u.Inline().End()
-			state.isLastSpan = unparsedIndex == len(unparsed)-1
-			plainStart := u.Inline().Start()
+			state.spanEnd = u.End()
+			state.isLastSpan = unparsedIndex == len(container.inlineChildren)-1
+			plainStart := u.Start()
 			for pos := plainStart; pos < state.spanEnd; {
 				switch source[pos] {
 				case '*', '_':
@@ -191,35 +196,31 @@ func (p *InlineParser) parse(dst []Node, source []byte, container *Block, unpars
 					pos = p.parseDelimiterRun(state, pos)
 					plainStart = pos
 				case '`':
-					if cs := p.parseCodeSpan(source, unparsed[unparsedIndex:], pos); cs.end >= 0 {
+					if cs := p.parseCodeSpan(source, container.inlineChildren[unparsedIndex:], pos); cs.end >= 0 {
 						state.add(&Inline{
 							kind:  TextKind,
 							start: plainStart,
 							end:   cs.start,
 						})
-						p.collectCodeSpan(state, cs, unparsed, &unparsedIndex)
+						p.collectCodeSpan(state, cs, container.inlineChildren, &unparsedIndex)
 
 						pos = cs.end
 						plainStart = pos
-						u = unparsed[unparsedIndex]
-						state.spanEnd = u.Inline().End()
-						state.isLastSpan = unparsedIndex == len(unparsed)-1
+						u = container.inlineChildren[unparsedIndex]
+						state.spanEnd = u.End()
+						state.isLastSpan = unparsedIndex == len(container.inlineChildren)-1
 					} else {
 						// Advance past literal backtick string.
 						pos = cs.contentStart
 					}
 				case '\\':
-					if k := state.container.Inline().Kind(); k == CodeSpanKind || k == AutolinkKind || k == RawHTMLKind {
-						pos++
-					} else {
-						state.add(&Inline{
-							kind:  TextKind,
-							start: plainStart,
-							end:   pos,
-						})
-						pos = p.parseBackslash(state, pos)
-						plainStart = pos
-					}
+					state.add(&Inline{
+						kind:  TextKind,
+						start: plainStart,
+						end:   pos,
+					})
+					pos = p.parseBackslash(state, pos)
+					plainStart = pos
 				default:
 					pos++
 				}
@@ -230,11 +231,11 @@ func (p *InlineParser) parse(dst []Node, source []byte, container *Block, unpars
 				end:   state.spanEnd,
 			})
 		default:
-			state.dst = append(state.dst, u)
+			dummy.children = append(dummy.children, u)
 		}
 	}
 	p.processEmphasis(state, 0)
-	return state.dst
+	return dummy.children
 }
 
 func (p *InlineParser) parseBackslash(state *inlineState, start int) (end int) {
@@ -419,7 +420,7 @@ type codeSpan struct {
 	end          int
 }
 
-func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) codeSpan {
+func (p *InlineParser) parseCodeSpan(source []byte, unparsed []*Inline, start int) codeSpan {
 	result := codeSpan{
 		start:        start,
 		contentStart: start,
@@ -427,14 +428,14 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) 
 		end:          -1,
 	}
 	backtickLength := 0
-	for result.contentStart < unparsed[0].Inline().End() && source[result.contentStart] == '`' {
+	for result.contentStart < unparsed[0].End() && source[result.contentStart] == '`' {
 		backtickLength++
 		result.contentStart++
 	}
 
 	result.contentEnd = result.contentStart
 	for {
-		if result.contentEnd >= unparsed[result.nodeCount].Inline().End() {
+		if result.contentEnd >= unparsed[result.nodeCount].End() {
 			for {
 				result.nodeCount++
 				if result.nodeCount >= len(unparsed) {
@@ -442,11 +443,11 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) 
 					result.contentEnd = -1
 					return result
 				}
-				if unparsed[result.nodeCount].Inline().Kind() == UnparsedKind {
+				if unparsed[result.nodeCount].Kind() == UnparsedKind {
 					break
 				}
 			}
-			result.contentEnd = unparsed[result.nodeCount].Inline().Start()
+			result.contentEnd = unparsed[result.nodeCount].Start()
 		}
 
 		if source[result.contentEnd] != '`' {
@@ -455,7 +456,7 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) 
 		}
 		currentRunLength := 1
 		peekPos := result.contentEnd + 1
-		for peekPos < unparsed[result.nodeCount].Inline().End() && source[peekPos] == '`' {
+		for peekPos < unparsed[result.nodeCount].End() && source[peekPos] == '`' {
 			currentRunLength++
 			peekPos++
 		}
@@ -468,7 +469,7 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []Node, start int) 
 	}
 }
 
-func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan, unparsed []Node, unparsedIndex *int) {
+func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan, unparsed []*Inline, unparsedIndex *int) {
 	codeSpanNode := &Inline{
 		kind:  CodeSpanKind,
 		start: cs.start,
@@ -507,21 +508,21 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan, unparsed
 		addSpan(&Inline{
 			kind:  TextKind,
 			start: cs.contentStart,
-			end:   unparsed[*unparsedIndex].Inline().End(),
+			end:   unparsed[*unparsedIndex].End(),
 		})
 		for i := 0; i < cs.nodeCount-1; i++ {
 			*unparsedIndex++
 			u := unparsed[*unparsedIndex]
 			addSpan(&Inline{
 				kind:  TextKind,
-				start: u.Inline().Start(),
-				end:   u.Inline().End(),
+				start: u.Start(),
+				end:   u.End(),
 			})
 		}
 		*unparsedIndex++
 		addSpan(&Inline{
 			kind:  TextKind,
-			start: unparsed[*unparsedIndex].Inline().Start(),
+			start: unparsed[*unparsedIndex].Start(),
 			end:   cs.contentEnd,
 		})
 	}
@@ -636,11 +637,7 @@ func parseInfoString(source []byte, start, end int) *Inline {
 
 func (state *inlineState) add(newNode *Inline) {
 	state.parentMap[newNode] = state.container
-	if inline := state.container.Inline(); inline != nil {
-		inline.children = append(inline.children, newNode)
-	} else {
-		state.dst = append(state.dst, newNode.AsNode())
-	}
+	state.container.children = append(state.container.children, newNode)
 }
 
 // wrap inserts a new inline that wraps the nodes between two nodes, exclusive.
@@ -652,99 +649,48 @@ func (state *inlineState) wrap(kind InlineKind, startNode, endNode *Inline) {
 		end:   endNode.start,
 	}
 	state.parentMap[newNode] = parent
-	if inlineParent := parent.Inline(); inlineParent != nil {
-		startIndex := 1
-		for ; startIndex < len(inlineParent.children); startIndex++ {
-			if inlineParent.children[startIndex-1] == startNode {
-				break
-			}
+	startIndex := 1
+	for ; startIndex < len(parent.children); startIndex++ {
+		if parent.children[startIndex-1] == startNode {
+			break
 		}
-		if len(inlineParent.children) == 0 || inlineParent.children[startIndex-1] != startNode {
-			panic("could not find startNode")
-		}
-
-		endIndex := startIndex
-		for ; endIndex < len(inlineParent.children); endIndex++ {
-			if inlineParent.children[endIndex] == endNode {
-				break
-			}
-		}
-
-		newNode.children = append(newNode.children, inlineParent.children[startIndex:endIndex]...)
-
-		if startIndex == endIndex {
-			inlineParent.children = append(inlineParent.children, nil)
-			copy(inlineParent.children[endIndex+1:], inlineParent.children[endIndex:])
-			inlineParent.children[startIndex] = newNode
-		} else {
-			inlineParent.children = deleteInlineNodes(inlineParent.children, startIndex+1, endIndex)
-		}
-		inlineParent.children[startIndex] = newNode
-	} else {
-		startIndex := 1
-		for ; startIndex < len(state.dst); startIndex++ {
-			if state.dst[startIndex-1].Inline() == startNode {
-				break
-			}
-		}
-		if len(state.dst) == 0 || state.dst[startIndex-1].Inline() != startNode {
-			panic("could not find startNode")
-		}
-
-		endIndex := startIndex
-		for ; endIndex < len(state.dst); endIndex++ {
-			if state.dst[endIndex].Inline() == endNode {
-				break
-			}
-		}
-
-		for _, c := range state.dst[startIndex:endIndex] {
-			if c := c.Inline(); c != nil {
-				newNode.children = append(newNode.children, c)
-			}
-		}
-
-		if startIndex == endIndex {
-			state.dst = append(state.dst, Node{})
-			copy(state.dst[endIndex+1:], state.dst[endIndex:])
-			state.dst[startIndex] = newNode.AsNode()
-		} else {
-			copy(state.dst[startIndex+1:], state.dst[endIndex:])
-			state.dst = state.dst[:len(state.dst)-(endIndex-startIndex-1)]
-		}
-		state.dst[startIndex] = newNode.AsNode()
+	}
+	if len(parent.children) == 0 || parent.children[startIndex-1] != startNode {
+		panic("could not find startNode")
 	}
 
+	endIndex := startIndex
+	for ; endIndex < len(parent.children); endIndex++ {
+		if parent.children[endIndex] == endNode {
+			break
+		}
+	}
+
+	newNode.children = append(newNode.children, parent.children[startIndex:endIndex]...)
+
+	if startIndex == endIndex {
+		parent.children = append(parent.children, nil)
+		copy(parent.children[endIndex+1:], parent.children[endIndex:])
+		parent.children[startIndex] = newNode
+	} else {
+		parent.children = deleteInlineNodes(parent.children, startIndex+1, endIndex)
+	}
+	parent.children[startIndex] = newNode
+
 	for _, c := range newNode.children {
-		state.parentMap[c] = newNode.AsNode()
+		state.parentMap[c] = newNode
 	}
 }
 
 func (state *inlineState) remove(node *Inline) {
-	if inline := state.container.Inline(); inline != nil {
-		n := 0
-		for _, c := range inline.children {
-			if c != node {
-				inline.children[n] = c
-				n++
-			}
+	n := 0
+	for _, c := range state.container.children {
+		if c != node {
+			state.container.children[n] = c
+			n++
 		}
-		inline.children = deleteInlineNodes(inline.children, n, len(inline.children))
-	} else {
-		n := 0
-		for _, c := range state.dst {
-			if c.Inline() != node {
-				state.dst[n] = c
-				n++
-			}
-		}
-		clear := state.dst[n:]
-		for i := range clear {
-			clear[i] = Node{}
-		}
-		state.dst = state.dst[:n]
 	}
-
+	state.container.children = deleteInlineNodes(state.container.children, n, len(state.container.children))
 	delete(state.parentMap, node)
 }
 
@@ -838,8 +784,11 @@ func (d inlineDelimiter) String() string {
 }
 
 func hasUnparsed(b *Block) bool {
-	for _, c := range b.Children() {
-		if c.Inline().Kind() == UnparsedKind {
+	if b == nil {
+		return false
+	}
+	for _, c := range b.inlineChildren {
+		if c.Kind() == UnparsedKind {
 			return true
 		}
 	}

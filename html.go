@@ -43,7 +43,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 	switch block.Kind() {
 	case ParagraphKind:
 		dst = append(dst, "<p>"...)
-		dst = appendChildrenHTML(dst, source, block.Children(), false)
+		dst = appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</p>"...)
 	case ThematicBreakKind:
 		dst = append(dst, "<hr>"...)
@@ -52,7 +52,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		dst = append(dst, "<h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
-		dst = appendChildrenHTML(dst, source, block.Children(), false)
+		dst = appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
@@ -67,11 +67,11 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 			}
 		}
 		dst = append(dst, ">"...)
-		dst = appendChildrenHTML(dst, source, block.Children(), false)
+		dst = appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</code></pre>"...)
 	case BlockQuoteKind:
 		dst = append(dst, "<blockquote>"...)
-		dst = appendChildrenHTML(dst, source, block.Children(), false)
+		dst = appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</blockquote>"...)
 	case ListKind:
 		if block.IsOrderedList() {
@@ -85,7 +85,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		} else {
 			dst = append(dst, "<ul>"...)
 		}
-		dst = appendChildrenHTML(dst, source, block.Children(), false)
+		dst = appendChildrenHTML(dst, source, block, false)
 		if block.IsOrderedList() {
 			dst = append(dst, "</ol>"...)
 		} else {
@@ -93,25 +93,25 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		}
 	case ListItemKind:
 		dst = append(dst, "<li>"...)
-		dst = appendChildrenHTML(dst, source, block.Children(), block.IsTightList())
+		dst = appendChildrenHTML(dst, source, block, block.IsTightList())
 		dst = append(dst, "</li>"...)
 	}
 	return dst
 }
 
-func appendChildrenHTML(dst []byte, source []byte, children []Node, tight bool) []byte {
-	for _, c := range children {
-		if inline := c.Inline(); inline != nil {
-			dst = appendInlineHTML(dst, source, inline)
-			continue
+func appendChildrenHTML(dst []byte, source []byte, parent *Block, tight bool) []byte {
+	switch {
+	case parent != nil && len(parent.inlineChildren) > 0:
+		for _, c := range parent.inlineChildren {
+			dst = appendInlineHTML(dst, source, c)
 		}
-		if sub := c.Block(); sub != nil {
-			if tight && sub.Kind() == ParagraphKind {
-				dst = appendChildrenHTML(dst, source, sub.Children(), false)
+	case parent != nil && len(parent.blockChildren) > 0:
+		for _, c := range parent.blockChildren {
+			if tight && c.Kind() == ParagraphKind {
+				dst = appendChildrenHTML(dst, source, c, false)
 			} else {
-				dst = appendHTML(dst, source, sub)
+				dst = appendHTML(dst, source, c)
 			}
-			continue
 		}
 	}
 	return dst

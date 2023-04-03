@@ -36,10 +36,14 @@ type RootBlock struct {
 
 // A Block is a structural element in a CommonMark document.
 type Block struct {
-	kind     BlockKind
-	start    int
-	end      int
-	children []Node
+	kind  BlockKind
+	start int
+	end   int
+
+	// At most one of blockChildren or inlineChildren can be set.
+
+	blockChildren  []*Block
+	inlineChildren []*Inline
 
 	// indent is the block's indentation.
 	// For [ListItemKind], it is the number of columns required to continue the block.
@@ -82,11 +86,23 @@ func (b *Block) End() int {
 	return b.end
 }
 
-func (b *Block) Children() []Node {
-	if b == nil {
-		return nil
+func (b *Block) ChildCount() int {
+	switch {
+	case b == nil:
+		return 0
+	case len(b.blockChildren) > 0:
+		return len(b.blockChildren)
+	default:
+		return len(b.inlineChildren)
 	}
-	return b.children
+}
+
+func (b *Block) Child(i int) Node {
+	if len(b.blockChildren) > 0 {
+		return b.blockChildren[i].AsNode()
+	} else {
+		return b.inlineChildren[i].AsNode()
+	}
 }
 
 func (b *Block) HeadingLevel() int {
@@ -116,7 +132,7 @@ func (b *Block) ListItemNumber(source []byte) int {
 	if !b.IsOrderedList() || b.kind != ListItemKind {
 		return -1
 	}
-	marker := b.firstChild().Inline()
+	marker := b.firstChild().Block()
 	if marker.Kind() != ListMarkerKind {
 		return -1
 	}
@@ -141,19 +157,18 @@ func (b *Block) InfoString() *Inline {
 }
 
 func (b *Block) firstChild() Node {
-	children := b.Children()
-	if len(children) == 0 {
+	if b.ChildCount() == 0 {
 		return Node{}
 	}
-	return children[0]
+	return b.Child(0)
 }
 
 func (b *Block) lastChild() Node {
-	children := b.Children()
-	if len(children) == 0 {
+	n := b.ChildCount()
+	if n == 0 {
 		return Node{}
 	}
-	return children[len(children)-1]
+	return b.Child(n - 1)
 }
 
 func (b *Block) isOpen() bool {
@@ -186,6 +201,7 @@ const (
 	BlockQuoteKind
 	ListItemKind
 	ListKind
+	ListMarkerKind
 
 	documentKind
 )
@@ -267,7 +283,7 @@ func (p *lineParser) setupMatch(child *Block) {
 	p.currentIndent = child.indent
 	switch child.Kind() {
 	case ListItemKind:
-		p.listItemHasChildren = len(child.Children()) > 1
+		p.listItemHasChildren = child.ChildCount() > 1
 	case FencedCodeBlockKind:
 		p.fenceChar = child.char
 		p.fenceCharCount = child.n
@@ -504,7 +520,7 @@ func (p *lineParser) openBlock(kind BlockKind) {
 		start: p.lineStart + p.i,
 		end:   -1,
 	}
-	p.container.children = append(p.container.children, newChild.AsNode())
+	p.container.blockChildren = append(p.container.blockChildren, newChild)
 	p.container = newChild
 }
 
@@ -539,14 +555,14 @@ func (p *lineParser) CollectInline(kind InlineKind, n int) {
 		return
 	}
 	if kind == InfoStringKind {
-		node := parseInfoString(p.root.Source, start, p.lineStart+p.i).AsNode()
-		p.container.children = append(p.container.children, node)
+		node := parseInfoString(p.root.Source, start, p.lineStart+p.i)
+		p.container.inlineChildren = append(p.container.inlineChildren, node)
 	} else {
-		p.container.children = append(p.container.children, (&Inline{
+		p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 			kind:  kind,
 			start: start,
 			end:   p.lineStart + p.i,
-		}).AsNode())
+		})
 	}
 }
 
@@ -669,7 +685,9 @@ var blockStarts = []func(*lineParser){
 			p.OpenListBlock(ListKind, m.delim)
 		}
 		p.OpenListBlock(ListItemKind, m.delim)
-		p.CollectInline(ListMarkerKind, m.end)
+		p.OpenBlock(ListMarkerKind)
+		p.Advance(m.end)
+		p.EndBlock()
 		if p.IsRestBlank() {
 			p.SetContainerIndent(indent + m.end + 1)
 			p.ConsumeLine()
@@ -728,17 +746,17 @@ var blocks = map[BlockKind]blockRule{
 			}
 
 			// Check for a blank line after non-final items.
-			items := block.Children()
+			items := block.blockChildren
 		determineLoose:
 			for i, item := range items {
-				if i < len(items)-1 && endsWithBlankLine(item.Block()) {
+				if i < len(items)-1 && endsWithBlankLine(item) {
 					block.listLoose = true
 					break determineLoose
 				}
-				subitems := item.Block().Children()
+				subitems := item.blockChildren
 				for j, subitem := range subitems {
 					if (i < len(items)-1 || j < len(subitems)-1) &&
-						endsWithBlankLine(subitem.Block()) {
+						endsWithBlankLine(subitem) {
 						block.listLoose = true
 						break determineLoose
 					}
@@ -746,7 +764,7 @@ var blocks = map[BlockKind]blockRule{
 			}
 			if block.listLoose {
 				for _, item := range items {
-					item.Block().listLoose = true
+					item.listLoose = true
 				}
 			}
 		},
@@ -824,13 +842,13 @@ var blocks = map[BlockKind]blockRule{
 		},
 		onClose: func(source []byte, block *Block) {
 			// "Blank lines preceding or following an indented code block are not included in it."
-			for i := len(block.children) - 1; i >= 0; i-- {
-				child := block.children[i].Inline()
+			for i := block.ChildCount() - 1; i >= 0; i-- {
+				child := block.inlineChildren[i]
 				if child.Kind() != TextKind || !isBlankLine(source[child.Start():child.End()]) {
 					break
 				}
-				block.children[i] = Node{} // free for GC
-				block.children = block.children[:i:i]
+				block.inlineChildren[i] = nil // free for GC
+				block.inlineChildren = block.inlineChildren[:i:i]
 			}
 		},
 		acceptsLines: true,

@@ -249,7 +249,7 @@ func addLineText(p *lineParser) {
 	}
 	lastLineBlank := isBlank && !(p.ContainerKind() == BlockQuoteKind ||
 		p.ContainerKind() == FencedCodeBlockKind ||
-		(p.ContainerKind() == ListItemKind && len(p.container.children) == 1 && p.container.start >= p.lineStart))
+		(p.ContainerKind() == ListItemKind && p.container.ChildCount() == 1 && p.container.start >= p.lineStart))
 	// Propagate lastLineBlank up through parents:
 	for c := p.container; c != nil; c = findParent(p.root, c) {
 		c.lastLineBlank = lastLineBlank
@@ -260,12 +260,12 @@ func addLineText(p *lineParser) {
 		if indent := p.Indent(); indent > 0 {
 			start := p.lineStart + p.i
 			p.ConsumeIndent(indent)
-			p.container.children = append(p.container.children, (&Inline{
+			p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 				kind:   IndentKind,
 				indent: indent,
 				start:  start,
 				end:    p.lineStart + p.i,
-			}).AsNode())
+			})
 		}
 	case !isBlank:
 		// Create paragraph container for line.
@@ -282,11 +282,11 @@ func addLineText(p *lineParser) {
 	if p.ContainerKind().IsCode() {
 		inlineKind = TextKind
 	}
-	p.container.children = append(p.container.children, (&Inline{
+	p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 		kind:  inlineKind,
 		start: p.lineStart + p.i,
 		end:   p.lineStart + len(p.line),
-	}).AsNode())
+	})
 }
 
 func findParent(root *RootBlock, b *Block) *Block {
