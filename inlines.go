@@ -666,6 +666,10 @@ func parseInfoString(source []byte, start, end int) *Inline {
 }
 
 func (state *inlineState) add(newNode *Inline) {
+	if newNode.start == newNode.end {
+		// Only add nodes that consume at least one source byte.
+		return
+	}
 	state.parentMap[newNode] = state.container
 	state.container.children = append(state.container.children, newNode)
 }
