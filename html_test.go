@@ -50,6 +50,9 @@ var supportedSections = map[string]struct{}{
 	"Inlines":                      {},
 	"Code spans":                   {},
 	"Emphasis and strong emphasis": {},
+	"Hard line breaks":             {},
+	"Soft line breaks":             {},
+	"Textual content":              {},
 }
 
 var skippedExamples = map[int]string{
@@ -78,6 +81,8 @@ var skippedExamples = map[int]string{
 	476: "raw HTML not implemented",
 	479: "autolinks not implemented",
 	480: "autolinks not implemented",
+	642: "raw HTML not implemented",
+	643: "raw HTML not implemented",
 }
 
 func TestSpec(t *testing.T) {

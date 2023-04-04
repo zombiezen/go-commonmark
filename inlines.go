@@ -157,13 +157,14 @@ func (p *InlineParser) Rewrite(root *RootBlock) {
 }
 
 type inlineState struct {
-	source     []byte
-	spanEnd    int
-	isLastSpan bool
-	blockKind  BlockKind
-	container  *Inline
-	stack      []delimiterStackElement
-	parentMap  map[*Inline]*Inline
+	source           []byte
+	spanEnd          int
+	isLastSpan       bool
+	blockKind        BlockKind
+	container        *Inline
+	stack            []delimiterStackElement
+	ignoreNextIndent bool
+	parentMap        map[*Inline]*Inline
 }
 
 func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
@@ -181,7 +182,14 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 		u := container.inlineChildren[unparsedIndex]
 		switch u.Kind() {
 		case 0:
+			state.ignoreNextIndent = false
+		case IndentKind:
+			if !state.ignoreNextIndent {
+				dummy.children = append(dummy.children, u)
+			}
+			state.ignoreNextIndent = false
 		case UnparsedKind:
+			state.ignoreNextIndent = false
 			state.spanEnd = u.End()
 			state.isLastSpan = unparsedIndex == len(container.inlineChildren)-1
 			plainStart := u.Start()
@@ -195,6 +203,24 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 					})
 					pos = p.parseDelimiterRun(state, pos)
 					plainStart = pos
+				case ' ':
+					end, ok := parseHardLineBreakSpace(source[pos:u.End()])
+					if ok && !state.isLastSpan {
+						state.add(&Inline{
+							kind:  TextKind,
+							start: plainStart,
+							end:   pos,
+						})
+						state.add(&Inline{
+							kind:  HardLineBreakKind,
+							start: pos,
+							end:   pos + end,
+						})
+						// Leading spaces at the beginning of the next line are ignored.
+						state.ignoreNextIndent = true
+						plainStart = pos + end
+					}
+					pos += end
 				case '`':
 					if cs := p.parseCodeSpan(source, container.inlineChildren[unparsedIndex:], pos); cs.end >= 0 {
 						state.add(&Inline{
@@ -231,6 +257,7 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 				end:   state.spanEnd,
 			})
 		default:
+			state.ignoreNextIndent = false
 			dummy.children = append(dummy.children, u)
 		}
 	}
@@ -249,6 +276,9 @@ func (p *InlineParser) parseBackslash(state *inlineState, start int) (end int) {
 		if state.isLastSpan {
 			// Hard line breaks not permitted at end of block.
 			newNode.kind = TextKind
+		} else {
+			// Leading spaces at the beginning of the next line are ignored.
+			state.ignoreNextIndent = true
 		}
 		state.add(newNode)
 		return newNode.end
@@ -781,6 +811,28 @@ func (d inlineDelimiter) String() string {
 	default:
 		return fmt.Sprintf("inlineDelimiter(%d)", int8(d))
 	}
+}
+
+// parseHardLineBreakSpace checks for a space-based [hard line break].
+//
+// [hard line break]: https://spec.commonmark.org/0.30/#hard-line-break
+func parseHardLineBreakSpace(remaining []byte) (end int, isHardLineBreak bool) {
+	const numSpaces = 2
+	for ; end < len(remaining) && end < numSpaces; end++ {
+		if remaining[end] != ' ' {
+			return end, false
+		}
+	}
+	if end < numSpaces {
+		return end, false
+	}
+
+	for ; end < len(remaining); end++ {
+		if c := remaining[end]; c != ' ' && c != '\n' && c != '\r' {
+			return end, false
+		}
+	}
+	return end, true
 }
 
 func hasUnparsed(b *Block) bool {
