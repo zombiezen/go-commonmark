@@ -82,7 +82,7 @@ func (inline *Inline) Text(source []byte) string {
 			sb.WriteByte(' ')
 		}
 		return sb.String()
-	case InfoStringKind:
+	case InfoStringKind, LinkDestinationKind, LinkTitleKind:
 		sb := new(strings.Builder)
 		sb.Grow(inline.End() - inline.Start())
 		for i, n := 0, inline.ChildCount(); i < n; i++ {
@@ -95,6 +95,34 @@ func (inline *Inline) Text(source []byte) string {
 	default:
 		return ""
 	}
+}
+
+// LinkDestination returns the destination child of a [LinkKind] node
+// or nil if none is present or the node is not a link.
+func (inline *Inline) LinkDestination() *Inline {
+	if inline.Kind() != LinkKind {
+		return nil
+	}
+	for i := len(inline.children) - 1; i >= len(inline.children)-2 && i >= 0; i-- {
+		if child := inline.children[i]; child.Kind() == LinkDestinationKind {
+			return child
+		}
+	}
+	return nil
+}
+
+// LinkTitle returns the title child of a [LinkKind] node
+// or nil if none is present or the node is not a link.
+func (inline *Inline) LinkTitle() *Inline {
+	if inline.Kind() != LinkKind {
+		return nil
+	}
+	for i := len(inline.children) - 1; i >= len(inline.children)-2 && i >= 0; i-- {
+		if child := inline.children[i]; child.Kind() == LinkTitleKind {
+			return child
+		}
+	}
+	return nil
 }
 
 // ChildCount returns the number of children the node has.
@@ -122,6 +150,10 @@ const (
 	InfoStringKind
 	EmphasisKind
 	StrongKind
+	LinkKind
+	ImageKind
+	LinkDestinationKind
+	LinkTitleKind
 
 	CodeSpanKind
 	AutolinkKind
@@ -157,14 +189,24 @@ func (p *InlineParser) Rewrite(root *RootBlock) {
 }
 
 type inlineState struct {
+	root             *Inline
 	source           []byte
-	spanEnd          int
-	isLastSpan       bool
+	unparsed         []*Inline
 	blockKind        BlockKind
-	container        *Inline
 	stack            []delimiterStackElement
 	ignoreNextIndent bool
 	parentMap        map[*Inline]*Inline
+}
+
+func (p *inlineState) spanEnd() int {
+	if len(p.unparsed) == 0 {
+		return len(p.source)
+	}
+	return p.unparsed[0].end
+}
+
+func (p *inlineState) isLastSpan() bool {
+	return len(p.unparsed) <= 1
 }
 
 func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
@@ -173,45 +215,70 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 		end:   container.end,
 	}
 	state := &inlineState{
+		root:      dummy,
 		source:    source,
 		blockKind: container.Kind(),
-		container: dummy,
+		unparsed:  container.inlineChildren,
 		parentMap: make(map[*Inline]*Inline),
 	}
-	for unparsedIndex := 0; unparsedIndex < len(container.inlineChildren); unparsedIndex++ {
-		u := container.inlineChildren[unparsedIndex]
-		switch u.Kind() {
+	for ; len(state.unparsed) > 0; state.unparsed = state.unparsed[1:] {
+		switch state.unparsed[0].Kind() {
 		case 0:
 			state.ignoreNextIndent = false
 		case IndentKind:
 			if !state.ignoreNextIndent {
-				dummy.children = append(dummy.children, u)
+				dummy.children = append(dummy.children, state.unparsed[0])
 			}
 			state.ignoreNextIndent = false
 		case UnparsedKind:
 			state.ignoreNextIndent = false
-			state.spanEnd = u.End()
-			state.isLastSpan = unparsedIndex == len(container.inlineChildren)-1
-			plainStart := u.Start()
-			for pos := plainStart; pos < state.spanEnd; {
+			plainStart := state.unparsed[0].Start()
+			for pos := plainStart; len(state.unparsed) > 0 && pos < state.spanEnd(); {
 				switch source[pos] {
 				case '*', '_':
-					state.add(&Inline{
+					state.addToRoot(&Inline{
 						kind:  TextKind,
 						start: plainStart,
 						end:   pos,
 					})
 					pos = p.parseDelimiterRun(state, pos)
 					plainStart = pos
+				case '[':
+					state.addToRoot(&Inline{
+						kind:  TextKind,
+						start: plainStart,
+						end:   pos,
+					})
+					node := &Inline{
+						kind:  TextKind,
+						start: pos,
+						end:   pos + 1,
+					}
+					state.addToRoot(node)
+					state.stack = append(state.stack, delimiterStackElement{
+						typ:   inlineDelimiterLink,
+						flags: activeFlag,
+						node:  node,
+					})
+					pos++
+					plainStart = pos
+				case ']':
+					state.addToRoot(&Inline{
+						kind:  TextKind,
+						start: plainStart,
+						end:   pos,
+					})
+					pos = p.parseEndBracket(state, pos)
+					plainStart = pos
 				case ' ':
-					end, ok := parseHardLineBreakSpace(source[pos:u.End()])
-					if ok && !state.isLastSpan {
-						state.add(&Inline{
+					end, ok := parseHardLineBreakSpace(source[pos:state.spanEnd()])
+					if ok && !state.isLastSpan() {
+						state.addToRoot(&Inline{
 							kind:  TextKind,
 							start: plainStart,
 							end:   pos,
 						})
-						state.add(&Inline{
+						state.addToRoot(&Inline{
 							kind:  HardLineBreakKind,
 							start: pos,
 							end:   pos + end,
@@ -222,25 +289,22 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 					}
 					pos += end
 				case '`':
-					if cs := p.parseCodeSpan(source, container.inlineChildren[unparsedIndex:], pos); cs.end >= 0 {
-						state.add(&Inline{
+					if cs := p.parseCodeSpan(state, pos); cs.end >= 0 {
+						state.addToRoot(&Inline{
 							kind:  TextKind,
 							start: plainStart,
 							end:   cs.start,
 						})
-						p.collectCodeSpan(state, cs, container.inlineChildren, &unparsedIndex)
+						p.collectCodeSpan(state, cs)
 
 						pos = cs.end
 						plainStart = pos
-						u = container.inlineChildren[unparsedIndex]
-						state.spanEnd = u.End()
-						state.isLastSpan = unparsedIndex == len(container.inlineChildren)-1
 					} else {
 						// Advance past literal backtick string.
 						pos = cs.contentStart
 					}
 				case '\\':
-					state.add(&Inline{
+					state.addToRoot(&Inline{
 						kind:  TextKind,
 						start: plainStart,
 						end:   pos,
@@ -251,14 +315,14 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 					pos++
 				}
 			}
-			state.add(&Inline{
+			state.addToRoot(&Inline{
 				kind:  TextKind,
 				start: plainStart,
-				end:   state.spanEnd,
+				end:   state.spanEnd(),
 			})
 		default:
 			state.ignoreNextIndent = false
-			dummy.children = append(dummy.children, u)
+			dummy.children = append(dummy.children, state.unparsed[0])
 		}
 	}
 	p.processEmphasis(state, 0)
@@ -266,27 +330,27 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 }
 
 func (p *InlineParser) parseBackslash(state *inlineState, start int) (end int) {
-	if start+1 >= state.spanEnd || state.source[start+1] == '\n' || state.source[start+1] == '\r' {
+	if start+1 >= state.spanEnd() || state.source[start+1] == '\n' || state.source[start+1] == '\r' {
 		// At end of line.
 		newNode := &Inline{
 			kind:  HardLineBreakKind,
 			start: start,
 			end:   start + 1,
 		}
-		if state.isLastSpan {
+		if state.isLastSpan() {
 			// Hard line breaks not permitted at end of block.
 			newNode.kind = TextKind
 		} else {
 			// Leading spaces at the beginning of the next line are ignored.
 			state.ignoreNextIndent = true
 		}
-		state.add(newNode)
+		state.addToRoot(newNode)
 		return newNode.end
 	}
 	if isASCIIPunctuation(state.source[start+1]) {
 		start++
 		end = start + 1
-		state.add(&Inline{
+		state.addToRoot(&Inline{
 			kind:  TextKind,
 			start: start,
 			end:   end,
@@ -294,7 +358,7 @@ func (p *InlineParser) parseBackslash(state *inlineState, start int) (end int) {
 		return end
 	}
 	end = start + 2
-	state.add(&Inline{
+	state.addToRoot(&Inline{
 		kind:  TextKind,
 		start: start,
 		end:   end,
@@ -308,7 +372,7 @@ func (p *InlineParser) parseDelimiterRun(state *inlineState, start int) (end int
 		start: start,
 		end:   start + 1,
 	}
-	for node.end < state.spanEnd && state.source[node.end] == state.source[node.start] {
+	for node.end < state.spanEnd() && state.source[node.end] == state.source[node.start] {
 		node.end++
 	}
 
@@ -323,9 +387,304 @@ func (p *InlineParser) parseDelimiterRun(state *inlineState, start int) (end int
 		elem.typ = inlineDelimiterUnderscore
 	}
 
-	state.add(node)
+	state.addToRoot(node)
 	state.stack = append(state.stack, elem)
 	return node.end
+}
+
+func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) {
+	openDelimIndex := p.lookForLinkOrImage(state)
+	if openDelimIndex < 0 {
+		state.addToRoot(&Inline{
+			kind:  TextKind,
+			start: start,
+			end:   start + 1,
+		})
+		return start + 1
+	}
+	kind := LinkKind
+	if state.stack[openDelimIndex].typ == inlineDelimiterImage {
+		kind = ImageKind
+	}
+	// TODO(soon): Add more link types.
+	switch {
+	case start+1 < state.spanEnd() && state.source[start+1] == '(':
+		info := p.parseInlineLink(state, start+1)
+		if info.start < 0 {
+			state.addToRoot(&Inline{
+				kind:  TextKind,
+				start: start,
+				end:   start + 1,
+			})
+			return start + 1
+		}
+
+		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
+		if info.destination.start >= 0 {
+			destNode := &Inline{
+				kind:  LinkDestinationKind,
+				start: info.destination.start,
+				end:   info.destination.end,
+			}
+			p.addLinkAttributeText(state.source, info.lines, destNode, info.destination.textStart, info.destination.textEnd)
+			linkNode.children = append(linkNode.children, destNode)
+		}
+		if info.titleStart >= 0 {
+			linkNode.children = append(linkNode.children, &Inline{
+				kind:  LinkTitleKind,
+				start: info.titleStart,
+				end:   info.titleEnd,
+			})
+		}
+		p.processEmphasis(state, openDelimIndex+1)
+		state.remove(state.stack[openDelimIndex].node)
+		state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
+		if kind == LinkKind {
+			for i := range state.stack[:openDelimIndex] {
+				if state.stack[i].typ == inlineDelimiterLink {
+					state.stack[i].flags &^= activeFlag
+				}
+			}
+		}
+		return info.end
+	default:
+		state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
+		state.addToRoot(&Inline{
+			kind:  TextKind,
+			start: start,
+			end:   start + 1,
+		})
+		return start + 1
+	}
+}
+
+type inlineLinkInfo struct {
+	lines       [2]*Inline
+	start       int
+	end         int
+	destination linkDestination
+	titleStart  int
+	titleEnd    int
+}
+
+func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result inlineLinkInfo) {
+	lines := [2]*Inline{state.unparsed[0]}
+	for i, u := range state.unparsed[1:] {
+		if u.Kind() == UnparsedKind {
+			lines[1] = u
+			defer func(nextLineIndex int) {
+				if result.end > lines[1].Start() {
+					state.unparsed = state.unparsed[nextLineIndex:]
+				}
+			}(i)
+			break
+		}
+	}
+	origLines := lines
+
+	// Skip initial opening parenthesis.
+	pos := start + 1
+	// Skip any leading spaces.
+	for {
+		if pos >= lines[0].End() {
+			if lines[1] == nil {
+				return inlineLinkInfo{start: -1, end: -1}
+			}
+			lines[0], lines[1] = lines[1], nil
+			pos = lines[0].start
+			continue
+		}
+		if state.source[pos] != ' ' && state.source[pos] != '\t' {
+			break
+		}
+		pos++
+	}
+
+	result = inlineLinkInfo{
+		lines:      origLines,
+		start:      start,
+		end:        -1,
+		titleStart: -1,
+		titleEnd:   -1,
+	}
+	result.destination = p.parseLinkDestination(state.source, lines, pos)
+	if result.destination.end >= 0 {
+		pos = result.destination.end
+		if pos >= lines[0].End() {
+			lines[0], lines[1] = lines[1], nil
+		}
+		// TODO(now): Skip spaces.
+	}
+	// TODO(now): Title
+	if pos >= lines[0].End() || state.source[pos] != ')' {
+		return inlineLinkInfo{start: -1, end: -1}
+	}
+	result.end = pos + 1
+	return result
+}
+
+type linkDestination struct {
+	start     int
+	end       int
+	textStart int
+	textEnd   int
+}
+
+func (p *InlineParser) parseLinkDestination(source []byte, lines [2]*Inline, start int) linkDestination {
+	switch c := source[start]; {
+	case c == '<':
+		for pos := start + 1; pos < lines[0].End(); {
+			switch source[pos] {
+			case '\\':
+				pos += 2
+			case '>':
+				return linkDestination{
+					start:     start,
+					textStart: start + 1,
+					textEnd:   pos,
+					end:       pos + 1,
+				}
+			default:
+				pos++
+			}
+		}
+		return linkDestination{
+			start:     -1,
+			end:       -1,
+			textStart: -1,
+			textEnd:   -1,
+		}
+	case !isASCIIControl(c) && c != ' ':
+		parenCount := 0
+		for pos := start; ; {
+			if pos >= lines[0].end {
+				if lines[1] == nil {
+					if start < lines[0].end {
+						return linkDestination{
+							start:     start,
+							textStart: start,
+							textEnd:   pos,
+							end:       pos,
+						}
+					} else {
+						return linkDestination{
+							start:     -1,
+							end:       -1,
+							textStart: -1,
+							textEnd:   -1,
+						}
+					}
+				}
+				lines[0], lines[1] = lines[1], nil
+				pos = lines[0].start
+				continue
+			}
+			switch c := source[pos]; {
+			case isASCIIControl(c) || c == ' ':
+				return linkDestination{
+					start:     -1,
+					end:       -1,
+					textStart: -1,
+					textEnd:   -1,
+				}
+			case c == '\\':
+				pos += 2
+			case c == '(':
+				parenCount++
+				pos++
+			case c == ')':
+				parenCount--
+				if parenCount < 0 {
+					if start < pos {
+						return linkDestination{
+							start:     start,
+							textStart: start,
+							textEnd:   pos,
+							end:       pos,
+						}
+					} else {
+						return linkDestination{
+							start:     -1,
+							end:       -1,
+							textStart: -1,
+							textEnd:   -1,
+						}
+					}
+				}
+				pos++
+			default:
+				pos++
+			}
+		}
+	default:
+		return linkDestination{
+			start:     -1,
+			end:       -1,
+			textStart: -1,
+			textEnd:   -1,
+		}
+	}
+}
+
+func (p *InlineParser) addLinkAttributeText(source []byte, lines [2]*Inline, parent *Inline, start, end int) {
+	plainStart := start
+	for pos := start; pos < end; {
+		if pos >= lines[0].End() {
+			if lines[1] == nil {
+				break
+			}
+			if plainStart < pos {
+				parent.children = append(parent.children, &Inline{
+					kind:  TextKind,
+					start: plainStart,
+					end:   lines[0].End(),
+				})
+			}
+			lines[0], lines[1] = lines[1], nil
+			pos = lines[0].start
+			plainStart = pos
+			continue
+		}
+		switch source[pos] {
+		case '\\':
+			if pos+1 >= end || pos+1 >= lines[0].End() || !isASCIIPunctuation(source[pos+1]) {
+				pos++
+				continue
+			}
+			if plainStart < pos {
+				parent.children = append(parent.children, &Inline{
+					kind:  TextKind,
+					start: plainStart,
+					end:   pos,
+				})
+			}
+			plainStart = pos + 1
+			pos += 2
+		default:
+			pos++
+		}
+	}
+	if plainStart < end {
+		parent.children = append(parent.children, &Inline{
+			kind:  TextKind,
+			start: plainStart,
+			end:   end,
+		})
+	}
+}
+
+func (p *InlineParser) lookForLinkOrImage(state *inlineState) int {
+	for i := len(state.stack) - 1; i >= 0; i-- {
+		curr := &state.stack[i]
+		if curr.typ == inlineDelimiterLink || curr.typ == inlineDelimiterImage {
+			if curr.flags&activeFlag == 0 {
+				state.stack = deleteDelimiterStack(state.stack, i, i+1)
+				return -1
+			}
+			return i
+		}
+	}
+	return -1
 }
 
 // emphasisFlags determines whether the given [delimiter run]
@@ -450,7 +809,7 @@ type codeSpan struct {
 	end          int
 }
 
-func (p *InlineParser) parseCodeSpan(source []byte, unparsed []*Inline, start int) codeSpan {
+func (p *InlineParser) parseCodeSpan(state *inlineState, start int) codeSpan {
 	result := codeSpan{
 		start:        start,
 		contentStart: start,
@@ -458,35 +817,35 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []*Inline, start in
 		end:          -1,
 	}
 	backtickLength := 0
-	for result.contentStart < unparsed[0].End() && source[result.contentStart] == '`' {
+	for result.contentStart < state.spanEnd() && state.source[result.contentStart] == '`' {
 		backtickLength++
 		result.contentStart++
 	}
 
 	result.contentEnd = result.contentStart
 	for {
-		if result.contentEnd >= unparsed[result.nodeCount].End() {
+		if result.contentEnd >= state.unparsed[result.nodeCount].End() {
 			for {
 				result.nodeCount++
-				if result.nodeCount >= len(unparsed) {
+				if result.nodeCount >= len(state.unparsed) {
 					// Hit end of input before encountering end of code span.
 					result.contentEnd = -1
 					return result
 				}
-				if unparsed[result.nodeCount].Kind() == UnparsedKind {
+				if state.unparsed[result.nodeCount].Kind() == UnparsedKind {
 					break
 				}
 			}
-			result.contentEnd = unparsed[result.nodeCount].Start()
+			result.contentEnd = state.unparsed[result.nodeCount].Start()
 		}
 
-		if source[result.contentEnd] != '`' {
+		if state.source[result.contentEnd] != '`' {
 			result.contentEnd++
 			continue
 		}
 		currentRunLength := 1
 		peekPos := result.contentEnd + 1
-		for peekPos < unparsed[result.nodeCount].End() && source[peekPos] == '`' {
+		for peekPos < state.unparsed[result.nodeCount].End() && state.source[peekPos] == '`' {
 			currentRunLength++
 			peekPos++
 		}
@@ -499,7 +858,7 @@ func (p *InlineParser) parseCodeSpan(source []byte, unparsed []*Inline, start in
 	}
 }
 
-func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan, unparsed []*Inline, unparsedIndex *int) {
+func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan) {
 	codeSpanNode := &Inline{
 		kind:  CodeSpanKind,
 		start: cs.start,
@@ -538,27 +897,26 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan, unparsed
 		addSpan(&Inline{
 			kind:  TextKind,
 			start: cs.contentStart,
-			end:   unparsed[*unparsedIndex].End(),
+			end:   state.unparsed[0].End(),
 		})
 		for i := 0; i < cs.nodeCount-1; i++ {
-			*unparsedIndex++
-			u := unparsed[*unparsedIndex]
+			state.unparsed = state.unparsed[1:]
 			addSpan(&Inline{
 				kind:  TextKind,
-				start: u.Start(),
-				end:   u.End(),
+				start: state.unparsed[0].Start(),
+				end:   state.unparsed[0].End(),
 			})
 		}
-		*unparsedIndex++
+		state.unparsed = state.unparsed[1:]
 		addSpan(&Inline{
 			kind:  TextKind,
-			start: unparsed[*unparsedIndex].Start(),
+			start: state.unparsed[0].Start(),
 			end:   cs.contentEnd,
 		})
 	}
 
 	codeSpanNode.children = p.stripCodeSpanSpace(state, codeSpanNode.children)
-	state.add(codeSpanNode)
+	state.addToRoot(codeSpanNode)
 }
 
 func (p *InlineParser) stripCodeSpanSpace(state *inlineState, slice []*Inline) []*Inline {
@@ -665,22 +1023,26 @@ func parseInfoString(source []byte, start, end int) *Inline {
 	return node
 }
 
-func (state *inlineState) add(newNode *Inline) {
+func (state *inlineState) addToRoot(newNode *Inline) {
 	if newNode.start == newNode.end {
 		// Only add nodes that consume at least one source byte.
 		return
 	}
-	state.parentMap[newNode] = state.container
-	state.container.children = append(state.container.children, newNode)
+	state.parentMap[newNode] = state.root
+	state.root.children = append(state.root.children, newNode)
 }
 
 // wrap inserts a new inline that wraps the nodes between two nodes, exclusive.
-func (state *inlineState) wrap(kind InlineKind, startNode, endNode *Inline) {
+// If endNode is nil, then it will wrap all the subsequent siblings of startNode.
+func (state *inlineState) wrap(kind InlineKind, startNode, endNode *Inline) *Inline {
 	parent := state.parentMap[startNode]
 	newNode := &Inline{
 		kind:  kind,
 		start: startNode.end,
-		end:   endNode.start,
+		end:   parent.end,
+	}
+	if endNode != nil {
+		newNode.end = endNode.start
 	}
 	state.parentMap[newNode] = parent
 	startIndex := 1
@@ -714,17 +1076,20 @@ func (state *inlineState) wrap(kind InlineKind, startNode, endNode *Inline) {
 	for _, c := range newNode.children {
 		state.parentMap[c] = newNode
 	}
+
+	return newNode
 }
 
 func (state *inlineState) remove(node *Inline) {
 	n := 0
-	for _, c := range state.container.children {
+	parent := state.parentMap[node]
+	for _, c := range parent.children {
 		if c != node {
-			state.container.children[n] = c
+			parent.children[n] = c
 			n++
 		}
 	}
-	state.container.children = deleteInlineNodes(state.container.children, n, len(state.container.children))
+	parent.children = deleteInlineNodes(parent.children, n, len(parent.children))
 	delete(state.parentMap, node)
 }
 

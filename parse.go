@@ -443,6 +443,10 @@ func isASCIIPunctuation(c byte) bool {
 		'{' <= c && c <= '~'
 }
 
+func isASCIIControl(c byte) bool {
+	return c <= 0x1f || c == 0x7f
+}
+
 // isUnicodeWhitespace reports whether the code point is a [Unicode whitespace character].
 //
 // [Unicode whitespace character]: https://spec.commonmark.org/0.30/#unicode-whitespace-character

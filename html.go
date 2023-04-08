@@ -22,6 +22,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func RenderHTML(w io.Writer, blocks []*RootBlock) error {
@@ -120,7 +121,7 @@ func appendChildrenHTML(dst []byte, source []byte, parent *Block, tight bool) []
 func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 	switch inline.Kind() {
 	case TextKind, UnparsedKind:
-		dst = append(dst, html.EscapeString(string(source[inline.Start():inline.End()]))...)
+		dst = append(dst, html.EscapeString(inline.Text(source))...)
 	case SoftLineBreakKind:
 		dst = append(dst, '\n')
 	case HardLineBreakKind:
@@ -143,10 +144,79 @@ func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 			dst = appendInlineHTML(dst, source, c)
 		}
 		dst = append(dst, "</code>"...)
+	case LinkKind:
+		dst = append(dst, `<a href="`...)
+		dst = append(dst, html.EscapeString(NormalizeURI(inline.LinkDestination().Text(source)))...)
+		dst = append(dst, `"`...)
+		if title := inline.LinkTitle(); title != nil {
+			dst = append(dst, ` title="`...)
+			dst = append(dst, html.EscapeString(title.Text(source))...)
+			dst = append(dst, `"`...)
+		}
+		dst = append(dst, ">"...)
+		for _, c := range inline.children {
+			dst = appendInlineHTML(dst, source, c)
+		}
+		dst = append(dst, "</a>"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			dst = append(dst, ' ')
 		}
 	}
 	return dst
+}
+
+// NormalizeURI percent-encodes any characters in a string
+// that are not reserved or unreserved URI characters.
+// This is commonly used for transforming CommonMark link destinations
+// into strings suitable for href or src attributes.
+func NormalizeURI(s string) string {
+	// RFC 3986 reserved and unreserved characters.
+	const safeSet = `;/?:@&=+$,-_.!~*'()#`
+
+	sb := new(strings.Builder)
+	sb.Grow(len(s))
+	skip := 0
+	var buf [utf8.UTFMax]byte
+	for i, c := range s {
+		if skip > 0 {
+			skip--
+			sb.WriteRune(c)
+			continue
+		}
+		switch {
+		case c == '%':
+			if i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]) {
+				skip = 2
+				sb.WriteByte('%')
+			} else {
+				sb.WriteString("%25")
+			}
+		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.ContainsRune(safeSet, c):
+			sb.WriteRune(c)
+		default:
+			n := utf8.EncodeRune(buf[:], c)
+			for _, b := range buf[:n] {
+				sb.WriteByte('%')
+				sb.WriteByte(urlHexDigit(b >> 4))
+				sb.WriteByte(urlHexDigit(b & 0x0f))
+			}
+		}
+	}
+	return sb.String()
+}
+
+func isHex(c byte) bool {
+	return 'a' <= c && c <= 'f' || 'A' <= c && c <= 'f' || '0' <= c && c <= '9'
+}
+
+func urlHexDigit(x byte) byte {
+	switch {
+	case x < 0xa:
+		return '0' + x
+	case x < 0x10:
+		return 'A' + x - 0xa
+	default:
+		panic("out of bounds")
+	}
 }
