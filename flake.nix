@@ -9,14 +9,31 @@
   outputs = { self, flake-utils, ... }@inputs:
     flake-utils.lib.eachDefaultSystem (system:
     let
-      pkgs = import inputs.nixpkgs { inherit system; };
+      pkgs = import inputs.nixpkgs {
+        inherit system;
+        overlays = [ self.overlays.cmark ];
+      };
     in
     {
       devShells.default = pkgs.mkShell {
         packages = [
-          inputs.nixpkgs.legacyPackages.${system}.go-tools
-          inputs.nixpkgs.legacyPackages.${system}.go_1_20
+          pkgs.cmark
+          pkgs.go-tools
+          pkgs.go_1_20
         ];
       };
-    });
+    }) // {
+      overlays.cmark = final: prev: {
+        cmark = prev.cmark.overrideAttrs (oldAttrs: let version = "0.30.3"; in {
+          inherit version;
+
+          src = prev.fetchFromGitHub {
+            owner = "commonmark";
+            repo = oldAttrs.pname;
+            rev = version;
+            hash = "sha256-/7TzaZYP8lndkfRPgCpBbazUBytVLXxqWHYktIsGox0=";
+          };
+        });
+      };
+    };
 }
