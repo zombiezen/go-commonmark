@@ -190,7 +190,7 @@ func descendOpenBlocks(p *lineParser) (allMatched bool) {
 		ok := rule.match(p)
 		p.clearMatchData()
 		if p.state == stateDescendTerminated {
-			child.close(p.source, p.lineStart+p.i)
+			child.close(p.source, p.container, p.lineStart+p.i)
 			return true
 		}
 		if !ok {
@@ -217,7 +217,7 @@ func descendOpenBlocks(p *lineParser) (allMatched bool) {
 func openNewBlocks(p *lineParser, allMatched bool) (hasText bool) {
 	if len(p.line) == 0 {
 		// Special case: EOF. Close the document block.
-		p.root.close(p.source, p.lineStart)
+		p.root.close(p.source, nil, p.lineStart)
 		p.container = nil
 		return false
 	}
@@ -239,7 +239,7 @@ func openNewBlocks(p *lineParser, allMatched bool) (hasText bool) {
 				}
 			}
 
-			p.container.lastChild().Block().close(p.source, p.lineStart)
+			p.container.lastChild().Block().close(p.source, p.container, p.lineStart)
 		}()
 	}
 

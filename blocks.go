@@ -178,11 +178,15 @@ func (b *Block) isOpen() bool {
 // close closes b and any open descendents.
 // It assumes that only the last child can be open.
 // Calling close on a nil block no-ops.
-func (b *Block) close(source []byte, end int) {
-	for ; b.isOpen(); b = b.lastChild().Block() {
+func (b *Block) close(source []byte, parent *Block, end int) {
+	if parent != nil && b != parent.lastChild().Block() {
+		panic("block to close must be the last child of the parent")
+	}
+	for ; b.isOpen(); parent, b = b, b.lastChild().Block() {
 		b.end = end
 		if f := blocks[b.kind].onClose; f != nil {
-			f(source, b)
+			replacement := f(source, b)
+			parent.blockChildren = append(parent.blockChildren[:len(parent.blockChildren)-1], replacement...)
 		}
 	}
 }
@@ -487,12 +491,13 @@ func (p *lineParser) openBlock(kind BlockKind) {
 		if rule := blocks[p.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
 			break
 		}
-		p.container.close(p.source, p.lineStart)
-		p.container = findParent(&p.root, p.container)
+		parent := findParent(&p.root, p.container)
+		p.container.close(p.source, parent, p.lineStart)
+		p.container = parent
 	}
 
 	// Append to the parent's children list.
-	p.container.lastChild().Block().close(p.source, p.lineStart)
+	p.container.lastChild().Block().close(p.source, p.container, p.lineStart)
 	newChild := &Block{
 		kind:  kind,
 		start: p.lineStart + p.i,
@@ -547,8 +552,9 @@ func (p *lineParser) EndBlock() {
 	case stateOpening:
 		p.state = stateOpenMatched
 	}
-	p.container.close(p.source, p.lineStart+p.i)
-	p.container = findParent(&p.root, p.container)
+	parent := findParent(&p.root, p.container)
+	p.container.close(p.source, parent, p.lineStart+p.i)
+	p.container = parent
 }
 
 // codeBlockIndentLimit is the column width of an indent
@@ -687,7 +693,7 @@ var blockStarts = []func(*lineParser){
 
 type blockRule struct {
 	match        func(*lineParser) bool
-	onClose      func(source []byte, block *Block)
+	onClose      func(source []byte, block *Block) []*Block
 	canContain   func(childKind BlockKind) bool
 	acceptsLines bool
 }
@@ -700,7 +706,7 @@ var blocks = map[BlockKind]blockRule{
 	ListKind: {
 		match:      func(*lineParser) bool { return true },
 		canContain: func(childKind BlockKind) bool { return childKind == ListItemKind },
-		onClose: func(source []byte, block *Block) {
+		onClose: func(source []byte, block *Block) []*Block {
 			endsWithBlankLine := func(block *Block) bool {
 				for block != nil {
 					if block.lastLineBlank {
@@ -736,6 +742,7 @@ var blocks = map[BlockKind]blockRule{
 					item.listLoose = true
 				}
 			}
+			return []*Block{block}
 		},
 	},
 	ListItemKind: {
@@ -809,7 +816,7 @@ var blocks = map[BlockKind]blockRule{
 			}
 			return true
 		},
-		onClose: func(source []byte, block *Block) {
+		onClose: func(source []byte, block *Block) []*Block {
 			// "Blank lines preceding or following an indented code block are not included in it."
 			for i := block.ChildCount() - 1; i >= 0; i-- {
 				child := block.inlineChildren[i]
@@ -819,6 +826,7 @@ var blocks = map[BlockKind]blockRule{
 				block.inlineChildren[i] = nil // free for GC
 				block.inlineChildren = block.inlineChildren[:i:i]
 			}
+			return []*Block{block}
 		},
 		acceptsLines: true,
 	},
