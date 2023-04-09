@@ -36,9 +36,8 @@ type RootBlock struct {
 
 // A Block is a structural element in a CommonMark document.
 type Block struct {
-	kind  BlockKind
-	start int
-	end   int
+	kind BlockKind
+	span Span
 
 	// At most one of blockChildren or inlineChildren can be set.
 
@@ -72,18 +71,11 @@ func (b *Block) Kind() BlockKind {
 	return b.kind
 }
 
-func (b *Block) Start() int {
+func (b *Block) Span() Span {
 	if b == nil {
-		return -1
+		return NullSpan()
 	}
-	return b.start
-}
-
-func (b *Block) End() int {
-	if b == nil {
-		return -1
-	}
-	return b.end
+	return b.span
 }
 
 func (b *Block) ChildCount() int {
@@ -136,7 +128,7 @@ func (b *Block) ListItemNumber(source []byte) int {
 	if marker.Kind() != ListMarkerKind {
 		return -1
 	}
-	parsed := parseListMarker(source[marker.Start():marker.End()])
+	parsed := parseListMarker(spanSlice(source, marker.Span()))
 	if parsed.end < 0 {
 		return -1
 	}
@@ -172,7 +164,7 @@ func (b *Block) lastChild() Node {
 }
 
 func (b *Block) isOpen() bool {
-	return b != nil && b.end < 0
+	return b != nil && b.span.End < 0
 }
 
 // close closes b and any open descendents.
@@ -183,7 +175,7 @@ func (b *Block) close(source []byte, parent *Block, end int) {
 		panic("block to close must be the last child of the parent")
 	}
 	for ; b.isOpen(); parent, b = b, b.lastChild().Block() {
-		b.end = end
+		b.span.End = end
 		if f := blocks[b.kind].onClose; f != nil {
 			replacement := f(source, b)
 			parent.blockChildren = append(parent.blockChildren[:len(parent.blockChildren)-1], replacement...)
@@ -271,8 +263,7 @@ func newLineParser(children []*Block, lineStart int, source []byte) *lineParser 
 	p := &lineParser{
 		root: Block{
 			kind:          documentKind,
-			start:         0,
-			end:           -1,
+			span:          Span{Start: 0, End: -1},
 			blockChildren: children,
 		},
 	}
@@ -499,9 +490,11 @@ func (p *lineParser) openBlock(kind BlockKind) {
 	// Append to the parent's children list.
 	p.container.lastChild().Block().close(p.source, p.container, p.lineStart)
 	newChild := &Block{
-		kind:  kind,
-		start: p.lineStart + p.i,
-		end:   -1,
+		kind: kind,
+		span: Span{
+			Start: p.lineStart + p.i,
+			End:   -1,
+		},
 	}
 	p.container.blockChildren = append(p.container.blockChildren, newChild)
 	p.container = newChild
@@ -533,13 +526,18 @@ func (p *lineParser) CollectInline(kind InlineKind, n int) {
 	start := p.lineStart + p.i
 	p.Advance(n)
 	if kind == InfoStringKind {
-		node := parseInfoString(p.source, start, p.lineStart+p.i)
+		node := parseInfoString(p.source, Span{
+			Start: start,
+			End:   p.lineStart + p.i,
+		})
 		p.container.inlineChildren = append(p.container.inlineChildren, node)
 	} else {
 		p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
-			kind:  kind,
-			start: start,
-			end:   p.lineStart + p.i,
+			kind: kind,
+			span: Span{
+				Start: start,
+				End:   p.lineStart + p.i,
+			},
 		})
 	}
 }
@@ -595,8 +593,8 @@ var blockStarts = []func(*lineParser){
 
 		p.ConsumeIndent(indent)
 		p.OpenHeadingBlock(ATXHeadingKind, h.level)
-		p.Advance(h.contentStart)
-		p.CollectInline(UnparsedKind, h.contentEnd-h.contentStart)
+		p.Advance(h.content.Start)
+		p.CollectInline(UnparsedKind, h.content.Len())
 		p.ConsumeLine()
 		p.EndBlock()
 	},
@@ -615,9 +613,9 @@ var blockStarts = []func(*lineParser){
 		p.ConsumeIndent(indent)
 		p.OpenFencedCodeBlock(f.char, f.n)
 		p.SetContainerIndent(indent)
-		if f.infoStart >= 0 {
-			p.Advance(f.infoStart)
-			p.CollectInline(InfoStringKind, f.infoEnd-f.infoStart)
+		if f.info.IsValid() {
+			p.Advance(f.info.Start)
+			p.CollectInline(InfoStringKind, f.info.Len())
 		}
 		p.ConsumeLine()
 	},
@@ -788,7 +786,7 @@ var blocks = map[BlockKind]blockRule{
 			if lineIndent < codeBlockIndentLimit {
 				startChar, startCharCount := p.CurrentCodeFence()
 				f := parseCodeFence(p.BytesAfterIndent())
-				if f.n > 0 && f.infoStart < 0 && f.char == startChar && f.n >= startCharCount {
+				if f.n > 0 && !f.info.IsValid() && f.char == startChar && f.n >= startCharCount {
 					// Closing fence.
 					p.ConsumeLine()
 					return false
@@ -820,7 +818,7 @@ var blocks = map[BlockKind]blockRule{
 			// "Blank lines preceding or following an indented code block are not included in it."
 			for i := block.ChildCount() - 1; i >= 0; i-- {
 				child := block.inlineChildren[i]
-				if child.Kind() != TextKind || !isBlankLine(source[child.Start():child.End()]) {
+				if child.Kind() != TextKind || !isBlankLine(spanSlice(source, child.Span())) {
 					break
 				}
 				block.inlineChildren[i] = nil // free for GC
@@ -873,9 +871,8 @@ func parseThematicBreak(line []byte) (end int) {
 }
 
 type atxHeading struct {
-	level        int // 1-6
-	contentStart int
-	contentEnd   int
+	level   int // 1-6
+	content Span
 }
 
 // parseATXHeading attempts to parse the line as an [ATX heading].
@@ -895,8 +892,7 @@ func parseATXHeading(line []byte) atxHeading {
 	// Consume required whitespace before heading.
 	i := h.level
 	if i >= len(line) || line[i] == '\n' || line[i] == '\r' {
-		h.contentStart = i
-		h.contentEnd = i
+		h.content = Span{Start: i, End: i}
 		return h
 	}
 	if !(line[i] == ' ' || line[i] == '\t') {
@@ -908,18 +904,18 @@ func parseATXHeading(line []byte) atxHeading {
 	for i < len(line) && line[i] == ' ' || line[i] == '\t' {
 		i++
 	}
-	h.contentStart = i
+	h.content.Start = i
 
 	// Find end of heading line. Skip past trailing spaces.
-	h.contentEnd = len(line)
+	h.content.End = len(line)
 	hitHash := false
 scanBack:
-	for ; h.contentEnd > h.contentStart; h.contentEnd-- {
-		switch line[h.contentEnd-1] {
+	for ; h.content.End > h.content.Start; h.content.End-- {
+		switch line[h.content.End-1] {
 		case '\r', '\n':
 			// Skip past EOL.
 		case ' ', '\t':
-			if isEndEscaped(line[:h.contentEnd-1]) {
+			if isEndEscaped(line[:h.content.End-1]) {
 				break scanBack
 			}
 		case '#':
@@ -936,24 +932,24 @@ scanBack:
 	// We've encountered one hashmark '#'.
 	// Consume all of them, unless they are preceded by a space or tab.
 scanTrailingHashes:
-	for i := h.contentEnd - 1; ; i-- {
-		if i <= h.contentStart {
-			h.contentEnd = h.contentStart
+	for i := h.content.End - 1; ; i-- {
+		if i <= h.content.Start {
+			h.content.End = h.content.Start
 			break
 		}
 		switch line[i] {
 		case '#':
 			// Keep going.
 		case ' ', '\t':
-			h.contentEnd = i + 1
+			h.content.End = i + 1
 			break scanTrailingHashes
 		default:
 			return h
 		}
 	}
 	// We've hit the end of hashmarks. Trim trailing whitespace.
-	for ; h.contentEnd > h.contentStart; h.contentEnd-- {
-		if b := line[h.contentEnd-1]; !(b == ' ' || b == '\t') || isEndEscaped(line[:h.contentEnd-1]) {
+	for ; h.content.End > h.content.Start; h.content.End-- {
+		if b := line[h.content.End-1]; !(b == ' ' || b == '\t') || isEndEscaped(line[:h.content.End-1]) {
 			break
 		}
 	}
@@ -961,10 +957,9 @@ scanTrailingHashes:
 }
 
 type codeFence struct {
-	char      byte // either '`' or '~'
-	n         int
-	infoStart int
-	infoEnd   int
+	char byte // either '`' or '~'
+	n    int
+	info Span
 }
 
 // parseCodeFence attempts to parse a [code fence] at the beginning of the line.
@@ -975,29 +970,28 @@ type codeFence struct {
 func parseCodeFence(line []byte) codeFence {
 	const minConsecutive = 3
 	if len(line) < minConsecutive || (line[0] != '`' && line[0] != '~') {
-		return codeFence{infoStart: -1, infoEnd: -1}
+		return codeFence{info: NullSpan()}
 	}
 	f := codeFence{
-		char:      line[0],
-		n:         1,
-		infoStart: -1,
-		infoEnd:   -1,
+		char: line[0],
+		n:    1,
+		info: NullSpan(),
 	}
 	for f.n < len(line) && line[f.n] == f.char {
 		f.n++
 	}
 	if f.n < minConsecutive {
-		return codeFence{infoStart: -1, infoEnd: -1}
+		return codeFence{info: NullSpan()}
 	}
-	for i := f.n; i < len(line) && f.infoStart < 0; i++ {
+	for i := f.n; i < len(line) && f.info.Start < 0; i++ {
 		if c := line[i]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
-			f.infoStart = i
+			f.info.Start = i
 		}
 	}
-	if f.infoStart >= 0 {
+	if f.info.Start >= 0 {
 		// Trim trailing whitespace.
-		for f.infoEnd = len(line); f.infoEnd > f.infoStart; f.infoEnd-- {
-			if c := line[f.infoEnd-1]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+		for f.info.End = len(line); f.info.End > f.info.Start; f.info.End-- {
+			if c := line[f.info.End-1]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
 				break
 			}
 		}
@@ -1005,9 +999,9 @@ func parseCodeFence(line []byte) codeFence {
 		// "If the info string comes after a backtick fence,
 		// it may not contain any backtick characters."
 		if f.char == '`' {
-			for i := f.infoStart; i < f.infoEnd; i++ {
+			for i := f.info.Start; i < f.info.End; i++ {
 				if line[i] == '`' {
-					return codeFence{infoStart: -1, infoEnd: -1}
+					return codeFence{info: NullSpan()}
 				}
 			}
 		}

@@ -51,11 +51,13 @@ func TestDelimiterFlags(t *testing.T) {
 	}
 	for _, test := range tests {
 		source := test.prefix + test.run + test.suffix
-		start := len(test.prefix)
-		end := len(test.prefix) + len(test.run)
-		got := emphasisFlags([]byte(source), start, end)
+		span := Span{
+			Start: len(test.prefix),
+			End:   len(test.prefix) + len(test.run),
+		}
+		got := emphasisFlags([]byte(source), span)
 		if got != test.want {
-			t.Errorf("delimiterFlags(%q, %d, %d) = %#03b; want %#03b", source, start, end, got, test.want)
+			t.Errorf("delimiterFlags(%q, %#v) = %#03b; want %#03b", source, span, got, test.want)
 		}
 	}
 }

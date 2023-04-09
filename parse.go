@@ -145,7 +145,7 @@ func (p *BlockParser) makeRoot(docChildren []*Block) *RootBlock {
 	if len(docChildren) == 0 || docChildren[0].isOpen() {
 		return nil
 	}
-	n := docChildren[0].End()
+	n := docChildren[0].Span().End
 	block := &RootBlock{
 		Source:      p.buf[:n:n],
 		StartLine:   p.lineno,
@@ -270,7 +270,7 @@ func addLineText(p *lineParser) {
 	}
 	lastLineBlank := isBlank && !(p.ContainerKind() == BlockQuoteKind ||
 		p.ContainerKind() == FencedCodeBlockKind ||
-		(p.ContainerKind() == ListItemKind && p.container.ChildCount() == 1 && p.container.start >= p.lineStart))
+		(p.ContainerKind() == ListItemKind && p.container.ChildCount() == 1 && p.container.Span().Start >= p.lineStart))
 	// Propagate lastLineBlank up through parents:
 	for c := p.container; c != nil; c = findParent(&p.root, c) {
 		c.lastLineBlank = lastLineBlank
@@ -284,8 +284,10 @@ func addLineText(p *lineParser) {
 			p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 				kind:   IndentKind,
 				indent: indent,
-				start:  start,
-				end:    p.lineStart + p.i,
+				span: Span{
+					Start: start,
+					End:   p.lineStart + p.i,
+				},
 			})
 		}
 	case !isBlank:
@@ -301,9 +303,11 @@ func addLineText(p *lineParser) {
 		inlineKind = TextKind
 	}
 	p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
-		kind:  inlineKind,
-		start: p.lineStart + p.i,
-		end:   p.lineStart + len(p.line),
+		kind: inlineKind,
+		span: Span{
+			Start: p.lineStart + p.i,
+			End:   p.lineStart + len(p.line),
+		},
 	})
 }
 
@@ -338,18 +342,18 @@ func offsetTree(node Node, n int) {
 		switch {
 		case curr.Block() != nil:
 			block := curr.Block()
-			block.start += n
-			if block.end >= 0 {
-				block.end += n
+			block.span.Start += n
+			if block.span.End >= 0 {
+				block.span.End += n
 			}
 			for i := block.ChildCount() - 1; i >= 0; i-- {
 				stack = append(stack, block.Child(i))
 			}
 		case curr.Inline() != nil:
 			inline := curr.Inline()
-			inline.start += n
-			if inline.end >= 0 {
-				inline.end += n
+			inline.span.Start += n
+			if inline.span.End >= 0 {
+				inline.span.End += n
 			}
 			for i := inline.ChildCount() - 1; i >= 0; i-- {
 				stack = append(stack, inline.Child(i).AsNode())
@@ -465,6 +469,42 @@ func indentLength(line []byte) int {
 		}
 	}
 	return len(line)
+}
+
+// Span is a contiguous region of a document
+// reference in a [RootBlock].
+type Span struct {
+	// Start is the index of the first byte of the span,
+	// relative to the beginning of the [RootBlock].
+	Start int
+	// End is the end index of the span (exclusive),
+	// relative to the beginning of the [RootBlock].
+	End int
+}
+
+// NullSpan returns an invalid span.
+func NullSpan() Span {
+	return Span{-1, -1}
+}
+
+func spanSlice(b []byte, span Span) []byte {
+	return b[span.Start:span.End]
+}
+
+// Len returns the length of the span.
+// The results are undefined if the span is invalid.
+func (span Span) Len() int {
+	return span.End - span.Start
+}
+
+// IsValid reports whether the span is valid.
+func (span Span) IsValid() bool {
+	return span.Start >= 0 && span.End >= 0 && span.Start <= span.End
+}
+
+// String formats the span indices as a mathematical range like "[12,34)".
+func (span Span) String() string {
+	return fmt.Sprintf("[%d,%d)", span.Start, span.End)
 }
 
 func isBlankLine(line []byte) bool {
