@@ -33,13 +33,15 @@ const tabStopSize = 4
 
 // A BlockParser splits a CommonMark document into blocks.
 type BlockParser struct {
-	buf      []byte // current block being parsed
-	offset   int64  // offset from beginning of stream to beginning of buf
-	parsePos int    // parse position within buf
-	lineno   int    // line number of parse position
+	buf    []byte // current block being parsed
+	offset int64  // offset from beginning of stream to beginning of buf
+	lineno int    // line number of beginning of buf
+	i      int    // parse position within buf
 
 	r   io.Reader
 	err error // non-nil indicates there is no more data after end of buf
+
+	blocks []*Block
 }
 
 // NewBlockParser returns a block parser that reads from r.
@@ -85,61 +87,85 @@ func Parse(source []byte) []*RootBlock {
 // Blocks returned by NextBlock will typically contain [UnparsedKind] nodes for any text:
 // use [*InlineParser.Rewrite] to complete parsing.
 func (p *BlockParser) NextBlock() (*RootBlock, error) {
-	// Keep going until we encounter a non-blank line.
-	var line []byte
-	for {
-		line = p.readline()
-		if len(line) == 0 {
-			return nil, p.err
-		}
-		if !isBlankLine(line) {
-			break
-		}
-
-		p.offset += int64(p.parsePos)
-		p.buf = p.buf[p.parsePos:]
-		p.parsePos = 0
+	// If we have any leftover closed blocks from previous calls,
+	// return those first.
+	if next := p.makeRoot(p.blocks); next != nil {
+		return next, nil
 	}
 
-	// Open root block.
-	root := &RootBlock{
-		StartLine:   p.lineno,
-		StartOffset: p.offset,
-		Block: Block{
-			end: -1,
-		},
-	}
-	lp := newLineParser(root, line)
-	hasText := openNewBlocks(lp, true)
-	if !root.isOpen() {
-		// Single-line block.
-		root.Source = p.consume()
-		return root, nil
-	}
-	if hasText {
-		addLineText(lp)
-	}
-
-	// Parse subsequent lines.
-	for {
-		lineStart := p.parsePos
+	lineStart := 0
+	if len(p.blocks) > 0 {
+		lineStart = p.i
 		p.readline()
-		lp.reset(lineStart, p.buf[:p.parsePos:p.parsePos])
+	} else {
+		// If we don't have any pending blocks,
+		// then we either just started or we previously hit a blank line.
+		p.offset += int64(p.i)
+		p.lineno += lineCount(p.buf[:p.i])
+		p.buf = p.buf[p.i:]
+		p.i = 0
 
+		// Keep going until we encounter a non-blank line.
+		for {
+			if !p.readline() {
+				return nil, p.err
+			}
+			if !isBlankLine(p.buf[:p.i]) {
+				break
+			}
+			p.offset += int64(p.i)
+			p.lineno++
+			p.buf = p.buf[p.i:]
+			p.i = 0
+		}
+	}
+
+	// Parse lines.
+	lp := newLineParser(p.blocks, lineStart, p.buf[:p.i:p.i])
+	for {
 		allMatched := descendOpenBlocks(lp)
 		hasText := false
 		if lp.state != stateDescendTerminated {
 			hasText = openNewBlocks(lp, allMatched)
 		}
-		if lp.container == nil {
-			p.parsePos = root.end
-			root.Source = p.consume()
-			return root, nil
-		}
 		if hasText {
 			addLineText(lp)
 		}
+		if next := p.makeRoot(lp.root.blockChildren); next != nil {
+			return next, nil
+		}
+
+		lineStart := p.i
+		p.readline()
+		lp.reset(lineStart, p.buf[:p.i:p.i])
 	}
+}
+
+func (p *BlockParser) makeRoot(docChildren []*Block) *RootBlock {
+	if len(docChildren) == 0 || docChildren[0].isOpen() {
+		return nil
+	}
+	n := docChildren[0].End()
+	block := &RootBlock{
+		Source:      p.buf[:n:n],
+		StartLine:   p.lineno,
+		StartOffset: p.offset,
+		Block:       *docChildren[0],
+	}
+
+	// Store any remaining children for later use, updating offsets.
+	p.blocks = docChildren[1:]
+	for _, b := range p.blocks {
+		offsetTree(b.AsNode(), -n)
+	}
+
+	// Advance parser state.
+	p.offset += int64(n)
+	p.lineno += lineCount(p.buf[:n])
+	p.buf = p.buf[n:]
+	p.i -= n
+
+	return block
 }
 
 // descendOpenBlocks iterates through the open blocks,
@@ -153,8 +179,8 @@ func (p *BlockParser) NextBlock() (*RootBlock, error) {
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
 func descendOpenBlocks(p *lineParser) (allMatched bool) {
-	p.container = nil
-	child := &p.root.Block
+	p.container = &p.root
+	child := p.root.lastChild().Block()
 	for {
 		rule := blocks[child.Kind()]
 		if rule.match == nil {
@@ -164,7 +190,7 @@ func descendOpenBlocks(p *lineParser) (allMatched bool) {
 		ok := rule.match(p)
 		p.clearMatchData()
 		if p.state == stateDescendTerminated {
-			child.close(p.root.Source, p.lineStart+p.i)
+			child.close(p.source, p.lineStart+p.i)
 			return true
 		}
 		if !ok {
@@ -190,8 +216,8 @@ func descendOpenBlocks(p *lineParser) (allMatched bool) {
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
 func openNewBlocks(p *lineParser, allMatched bool) (hasText bool) {
 	if len(p.line) == 0 {
-		// Special case: EOF. Close the root block.
-		p.root.close(p.root.Source, p.lineStart)
+		// Special case: EOF. Close the document block.
+		p.root.close(p.source, p.lineStart)
 		p.container = nil
 		return false
 	}
@@ -207,23 +233,18 @@ func openNewBlocks(p *lineParser, allMatched bool) (hasText bool) {
 			//
 			// [paragraph continuation text]: https://spec.commonmark.org/0.30/#paragraph-continuation-text
 			if !p.IsRestBlank() {
-				if tip := findTip(&p.root.Block); tip.Kind() == ParagraphKind {
+				if tip := findTip(&p.root); tip.Kind() == ParagraphKind {
 					p.container = tip
 					return
 				}
 			}
 
-			if p.container == nil {
-				p.root.close(p.root.Source, p.lineStart)
-			} else {
-				p.container.lastChild().Block().close(p.root.Source, p.lineStart)
-			}
+			p.container.lastChild().Block().close(p.source, p.lineStart)
 		}()
 	}
 
 openingLoop:
-	for p.root.isOpen() &&
-		(p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines) {
+	for p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines {
 		for _, startFunc := range blockStarts {
 			p.state = stateOpening
 			startFunc(p)
@@ -251,7 +272,7 @@ func addLineText(p *lineParser) {
 		p.ContainerKind() == FencedCodeBlockKind ||
 		(p.ContainerKind() == ListItemKind && p.container.ChildCount() == 1 && p.container.start >= p.lineStart))
 	// Propagate lastLineBlank up through parents:
-	for c := p.container; c != nil; c = findParent(p.root, c) {
+	for c := p.container; c != nil; c = findParent(&p.root, c) {
 		c.lastLineBlank = lastLineBlank
 	}
 
@@ -271,9 +292,6 @@ func addLineText(p *lineParser) {
 		// Create paragraph container for line.
 		p.OpenBlock(ParagraphKind)
 		p.ConsumeIndent(p.Indent())
-		if p.container == nil {
-			return
-		}
 	default:
 		return
 	}
@@ -289,8 +307,8 @@ func addLineText(p *lineParser) {
 	})
 }
 
-func findParent(root *RootBlock, b *Block) *Block {
-	for parent, curr := (*Block)(nil), &root.Block; ; {
+func findParent(root *Block, b *Block) *Block {
+	for parent, curr := (*Block)(nil), root; ; {
 		if curr == nil {
 			return nil
 		}
@@ -311,10 +329,39 @@ func findTip(b *Block) *Block {
 	return parent
 }
 
-// readline reads the next line of input, growing p.buf as necessary.
-// It will return a zero-length slice if and only if it has reached the end of input.
-// After calling readline, p.lineno will contain the current line's number.
-func (p *BlockParser) readline() []byte {
+// offsetTree adds n to every offset in the tree.
+func offsetTree(node Node, n int) {
+	stack := []Node{node}
+	for len(stack) > 0 {
+		curr := stack[0]
+		stack = stack[1:]
+		switch {
+		case curr.Block() != nil:
+			block := curr.Block()
+			block.start += n
+			if block.end >= 0 {
+				block.end += n
+			}
+			for i := block.ChildCount() - 1; i >= 0; i-- {
+				stack = append(stack, block.Child(i))
+			}
+		case curr.Inline() != nil:
+			inline := curr.Inline()
+			inline.start += n
+			if inline.end >= 0 {
+				inline.end += n
+			}
+			for i := inline.ChildCount() - 1; i >= 0; i-- {
+				stack = append(stack, inline.Child(i).AsNode())
+			}
+		}
+	}
+}
+
+// readline advances p.i to the end of the next line of input,
+// returning false if it has reached the end of input.
+// readline saves the line into p.buf, growing it as necessary.
+func (p *BlockParser) readline() bool {
 	const (
 		chunkSize    = 8 * 1024
 		maxBlockSize = 1024 * 1024
@@ -323,8 +370,8 @@ func (p *BlockParser) readline() []byte {
 	eolEnd := -1
 	for {
 		// Check if we have a line ending available.
-		if i := bytes.IndexAny(p.buf[p.parsePos:], "\r\n"); i >= 0 {
-			eolStart := p.parsePos + i
+		if i := bytes.IndexAny(p.buf[p.i:], "\r\n"); i >= 0 {
+			eolStart := p.i + i
 			if p.buf[eolStart] == '\n' {
 				eolEnd = eolStart + 1
 				break
@@ -354,10 +401,9 @@ func (p *BlockParser) readline() []byte {
 		// If we're already at the maximum block size,
 		// then drop the line and pretend it's an EOF.
 		if len(p.buf) >= maxBlockSize {
-			p.lineno++
-			p.buf = p.buf[:p.parsePos]
+			p.buf = p.buf[:p.i]
 			p.err = fmt.Errorf("line %d: block too large", p.lineno)
-			return nil
+			return false
 		}
 
 		// Grab more data from the reader.
@@ -375,18 +421,24 @@ func (p *BlockParser) readline() []byte {
 		p.buf = p.buf[:len(p.buf)+n]
 	}
 
-	line := p.buf[p.parsePos:eolEnd]
-	p.parsePos = eolEnd
-	p.lineno++
-	return line
+	ok := p.i < eolEnd
+	p.i = eolEnd
+	return ok
 }
 
-func (p *BlockParser) consume() []byte {
-	out := p.buf[:p.parsePos:p.parsePos]
-	p.offset += int64(p.parsePos)
-	p.buf = p.buf[p.parsePos:]
-	p.parsePos = 0
-	return out
+func lineCount(text []byte) int {
+	count := 0
+	for i, b := range text {
+		switch b {
+		case '\n':
+			count++
+		case '\r':
+			if i+1 >= len(text) || text[i+1] != '\n' {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // columnWidth returns the width of the given text in columns

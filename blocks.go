@@ -224,8 +224,9 @@ func (k BlockKind) IsHeading() bool {
 // In the future, lineParser could be exported to permit custom block rules,
 // but it's unclear how often this is needed.
 type lineParser struct {
-	root      *RootBlock
-	container *Block // nil represents the document
+	source    []byte
+	root      Block
+	container *Block
 
 	lineStart    int // number of bytes from beginning of root block to start of line
 	line         []byte
@@ -262,15 +263,22 @@ const (
 	stateDescendTerminated
 )
 
-func newLineParser(root *RootBlock, line []byte) *lineParser {
-	p := &lineParser{root: root}
-	p.reset(0, line)
+func newLineParser(children []*Block, lineStart int, source []byte) *lineParser {
+	p := &lineParser{
+		root: Block{
+			kind:          documentKind,
+			start:         0,
+			end:           -1,
+			blockChildren: children,
+		},
+	}
+	p.reset(lineStart, source)
 	return p
 }
 
 func (p *lineParser) reset(lineStart int, newSource []byte) {
 	p.lineStart = lineStart
-	p.root.Source = newSource
+	p.source = newSource
 	p.line = newSource[lineStart:]
 	p.i = 0
 	p.col = 0
@@ -405,19 +413,12 @@ func (p *lineParser) ConsumeIndent(n int) {
 // During block start checks, this will be the parent of block being considered.
 // During [blockRule] matches, this will be the same as the rule's kind.
 func (p *lineParser) ContainerKind() BlockKind {
-	if p.container == nil {
-		return documentKind
-	}
 	return p.container.kind
 }
 
 // TipKind returns the kind of the deepest open block.
 func (p *lineParser) TipKind() BlockKind {
-	tip := findTip(&p.root.Block)
-	if tip == nil {
-		return documentKind
-	}
-	return tip.kind
+	return findTip(&p.root).kind
 }
 
 func (p *lineParser) ContainerListDelim() byte {
@@ -456,17 +457,13 @@ func (p *lineParser) OpenListBlock(kind BlockKind, delim byte) {
 		panic("OpenListBlock must be called with ListKind or ListItemKind")
 	}
 	p.openBlock(kind)
-	if p.container != nil {
-		p.container.char = delim
-	}
+	p.container.char = delim
 }
 
 func (p *lineParser) OpenFencedCodeBlock(fenceChar byte, numChars int) {
 	p.openBlock(FencedCodeBlockKind)
-	if p.container != nil {
-		p.container.char = fenceChar
-		p.container.n = numChars
-	}
+	p.container.char = fenceChar
+	p.container.n = numChars
 }
 
 func (p *lineParser) OpenHeadingBlock(kind BlockKind, level int) {
@@ -474,9 +471,7 @@ func (p *lineParser) OpenHeadingBlock(kind BlockKind, level int) {
 		panic("OpenHeadingBlock must be called with ATXHeadingKind or SetextHeadingKind")
 	}
 	p.openBlock(kind)
-	if p.container != nil {
-		p.container.n = level
-	}
+	p.container.n = level
 }
 
 func (p *lineParser) openBlock(kind BlockKind) {
@@ -492,29 +487,12 @@ func (p *lineParser) openBlock(kind BlockKind) {
 		if rule := blocks[p.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
 			break
 		}
-		p.container.close(p.root.Source, p.lineStart)
-		if p.container == nil {
-			return
-		}
-		p.container = findParent(p.root, p.container)
+		p.container.close(p.source, p.lineStart)
+		p.container = findParent(&p.root, p.container)
 	}
 
-	// Special case: parent is the document.
-	if p.container == nil {
-		if p.root.kind != 0 {
-			// Attempting to open a new root block.
-			p.root.close(p.root.Source, p.lineStart)
-			return
-		}
-		p.root.kind = kind
-		p.root.start = p.lineStart + p.i
-		p.root.end = -1
-		p.container = &p.root.Block
-		return
-	}
-
-	// Normal case: append to the parent's children list.
-	p.container.lastChild().Block().close(p.root.Source, p.lineStart)
+	// Append to the parent's children list.
+	p.container.lastChild().Block().close(p.source, p.lineStart)
 	newChild := &Block{
 		kind:  kind,
 		start: p.lineStart + p.i,
@@ -532,12 +510,10 @@ func (p *lineParser) SetContainerIndent(indent int) {
 	case stateDescending, stateDescendTerminated:
 		panic("SetListItemIndent cannot be called in this context")
 	}
-	switch k := p.ContainerKind(); {
-	case k == ListItemKind || k == FencedCodeBlockKind:
-		p.container.indent = indent
-	case p.container != nil:
+	if k := p.ContainerKind(); k != ListItemKind && k != FencedCodeBlockKind {
 		panic("can't set indent for this block type")
 	}
+	p.container.indent = indent
 }
 
 // CollectInline adds a new [UnparsedKind] inline to the current block,
@@ -551,11 +527,8 @@ func (p *lineParser) CollectInline(kind InlineKind, n int) {
 	}
 	start := p.lineStart + p.i
 	p.Advance(n)
-	if p.container == nil {
-		return
-	}
 	if kind == InfoStringKind {
-		node := parseInfoString(p.root.Source, start, p.lineStart+p.i)
+		node := parseInfoString(p.source, start, p.lineStart+p.i)
 		p.container.inlineChildren = append(p.container.inlineChildren, node)
 	} else {
 		p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
@@ -574,12 +547,8 @@ func (p *lineParser) EndBlock() {
 	case stateOpening:
 		p.state = stateOpenMatched
 	}
-	if p.container == nil {
-		p.root.close(p.root.Source, p.lineStart+p.i)
-		return
-	}
-	p.container.close(p.root.Source, p.lineStart+p.i)
-	p.container = findParent(p.root, p.container)
+	p.container.close(p.source, p.lineStart+p.i)
+	p.container = findParent(&p.root, p.container)
 }
 
 // codeBlockIndentLimit is the column width of an indent
@@ -661,8 +630,8 @@ var blockStarts = []func(*lineParser){
 		p.ConsumeIndent(indent)
 		p.OpenBlock(ThematicBreakKind)
 		p.Advance(end)
-		p.EndBlock()
 		p.ConsumeLine()
+		p.EndBlock()
 	},
 
 	// List item.
