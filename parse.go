@@ -491,10 +491,29 @@ func spanSlice(b []byte, span Span) []byte {
 	return b[span.Start:span.End]
 }
 
-// Len returns the length of the span.
-// The results are undefined if the span is invalid.
+// Len returns the length of the span
+// or zero if the span is invalid.
 func (span Span) Len() int {
+	if !span.IsValid() {
+		return 0
+	}
 	return span.End - span.Start
+}
+
+// Intersect returns the intersection of two spans
+// or an invalid span if none exists.
+func (span Span) Intersect(span2 Span) Span {
+	if !span.IsValid() || !span2.IsValid() || span.Start >= span2.End || span.End <= span2.Start {
+		return NullSpan()
+	}
+	result := span
+	if span2.Start > span.Start {
+		result.Start = span2.Start
+	}
+	if span2.End < span.End {
+		result.End = span2.End
+	}
+	return result
 }
 
 // IsValid reports whether the span is valid.

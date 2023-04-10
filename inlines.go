@@ -441,7 +441,10 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 				kind: LinkDestinationKind,
 				span: info.destination.span,
 			}
-			p.addLinkAttributeText(state.source, info.lines, destNode, info.destination.text)
+			if info.destination.text.IsValid() {
+				r := newInlineByteReader(state.source, state.unparsed, info.destination.text.Start)
+				p.addLinkAttributeText(destNode, r, info.destination.text.End)
+			}
 			linkNode.children = append(linkNode.children, destNode)
 		}
 		if info.title.IsValid() {
@@ -475,33 +478,49 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 }
 
 type inlineLinkInfo struct {
-	lines       [2]*Inline
 	span        Span
 	destination linkDestination
 	title       Span
 }
 
 func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result inlineLinkInfo) {
-	lines := [2]*Inline{state.unparsed[0]}
-	for i, u := range state.unparsed[1:] {
-		if u.Kind() == UnparsedKind {
-			lines[1] = u
-			defer func(nextLineIndex int) {
-				if result.span.End > lines[1].Span().Start {
-					state.unparsed = state.unparsed[nextLineIndex:]
-				}
-			}(i)
-			break
+	// Skip initial opening parenthesis.
+	r := newInlineByteReader(state.source, state.unparsed, start+1)
+	defer func() {
+		// If we successfully parse, advance the spans we're considering.
+		if result.span.IsValid() {
+			if i := unparsedIndexForPosition(state.unparsed, result.span.End); i >= 0 {
+				state.unparsed = state.unparsed[i:]
+			} else {
+				state.unparsed = nil
+			}
+		}
+	}()
+	// Skip any leading spaces.
+	for r.current() == ' ' && r.current() == '\t' {
+		if !r.next() {
+			return inlineLinkInfo{
+				span: NullSpan(),
+				destination: linkDestination{
+					span: NullSpan(),
+					text: NullSpan(),
+				},
+				title: NullSpan(),
+			}
 		}
 	}
-	origLines := lines
 
-	// Skip initial opening parenthesis.
-	pos := start + 1
-	// Skip any leading spaces.
-	for {
-		if pos >= lines[0].Span().End {
-			if lines[1] == nil {
+	result = inlineLinkInfo{
+		span: Span{
+			Start: start,
+			End:   -1,
+		},
+		title: NullSpan(),
+	}
+	result.destination = parseLinkDestination(r)
+	if result.destination.span.IsValid() {
+		for r.current() == ' ' && r.current() == '\t' {
+			if !r.next() {
 				return inlineLinkInfo{
 					span: NullSpan(),
 					destination: linkDestination{
@@ -511,34 +530,10 @@ func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result in
 					title: NullSpan(),
 				}
 			}
-			lines[0], lines[1] = lines[1], nil
-			pos = lines[0].Span().Start
-			continue
 		}
-		if state.source[pos] != ' ' && state.source[pos] != '\t' {
-			break
-		}
-		pos++
-	}
-
-	result = inlineLinkInfo{
-		lines: origLines,
-		span: Span{
-			Start: start,
-			End:   -1,
-		},
-		title: NullSpan(),
-	}
-	result.destination = p.parseLinkDestination(state.source, lines, pos)
-	if result.destination.span.IsValid() {
-		pos = result.destination.span.End
-		if pos >= lines[0].Span().End {
-			lines[0], lines[1] = lines[1], nil
-		}
-		// TODO(now): Skip spaces.
 	}
 	// TODO(now): Title
-	if pos >= lines[0].Span().End || state.source[pos] != ')' {
+	if r.current() != ')' {
 		return inlineLinkInfo{
 			span: NullSpan(),
 			destination: linkDestination{
@@ -548,7 +543,7 @@ func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result in
 			title: NullSpan(),
 		}
 	}
-	result.span.End = pos + 1
+	result.span.End = r.pos + 1
 	return result
 }
 
@@ -557,137 +552,111 @@ type linkDestination struct {
 	text Span
 }
 
-func (p *InlineParser) parseLinkDestination(source []byte, lines [2]*Inline, start int) linkDestination {
-	switch c := source[start]; {
+func parseLinkDestination(r *inlineByteReader) linkDestination {
+	switch c := r.current(); {
 	case c == '<':
-		for pos := start + 1; pos < lines[0].Span().End; {
-			switch source[pos] {
+		start := r.pos
+		for r.next() {
+			switch r.current() {
+			case '\r', '\n':
+				return linkDestination{span: NullSpan(), text: NullSpan()}
 			case '\\':
-				pos += 2
+				if !r.next() {
+					return linkDestination{span: NullSpan(), text: NullSpan()}
+				}
+				if c := r.current(); c == '\n' || c == '\r' {
+					return linkDestination{span: NullSpan(), text: NullSpan()}
+				}
 			case '>':
+				r.next()
 				return linkDestination{
 					span: Span{
 						Start: start,
-						End:   pos + 1,
+						End:   r.prevPos + 1,
 					},
 					text: Span{
 						Start: start + 1,
-						End:   pos,
+						End:   r.prevPos,
 					},
 				}
-			default:
-				pos++
 			}
 		}
 		return linkDestination{span: NullSpan(), text: NullSpan()}
 	case !isASCIIControl(c) && c != ' ':
 		parenCount := 0
-		for pos := start; ; {
-			if pos >= lines[0].Span().End {
-				if lines[1] == nil {
-					if start < lines[0].Span().End {
-						return linkDestination{
-							span: Span{
-								Start: start,
-								End:   pos,
-							},
-							text: Span{
-								Start: start,
-								End:   pos,
-							},
-						}
-					} else {
-						return linkDestination{span: NullSpan(), text: NullSpan()}
-					}
-				}
-				lines[0], lines[1] = lines[1], nil
-				pos = lines[0].Span().Start
-				continue
-			}
-			switch c := source[pos]; {
+		start := r.pos
+	loop:
+		for {
+			switch c := r.current(); {
 			case isASCIIControl(c) || c == ' ':
-				return linkDestination{span: NullSpan(), text: NullSpan()}
+				break loop
 			case c == '\\':
-				pos += 2
+				if !r.next() {
+					break loop
+				}
+				if c := r.current(); isASCIIControl(c) || c == ' ' {
+					break loop
+				}
 			case c == '(':
 				parenCount++
-				pos++
 			case c == ')':
 				parenCount--
 				if parenCount < 0 {
-					if start < pos {
-						return linkDestination{
-							span: Span{
-								Start: start,
-								End:   pos,
-							},
-							text: Span{
-								Start: start,
-								End:   pos,
-							},
-						}
-					} else {
-						return linkDestination{span: NullSpan(), text: NullSpan()}
-					}
+					break loop
 				}
-				pos++
-			default:
-				pos++
+			}
+			if !r.next() {
+				break
 			}
 		}
+		span := Span{Start: start, End: r.prevPos + 1}
+		return linkDestination{span: span, text: span}
 	default:
 		return linkDestination{span: NullSpan(), text: NullSpan()}
 	}
 }
 
-func (p *InlineParser) addLinkAttributeText(source []byte, lines [2]*Inline, parent *Inline, span Span) {
-	plainStart := span.Start
-	for pos := span.Start; pos < span.End; {
-		if pos >= lines[0].Span().End {
-			if lines[1] == nil {
-				break
-			}
-			if plainStart < pos {
-				parent.children = append(parent.children, &Inline{
-					kind: TextKind,
-					span: Span{
-						Start: plainStart,
-						End:   lines[0].Span().End,
-					},
-				})
-			}
-			lines[0], lines[1] = lines[1], nil
-			pos = lines[0].Span().Start
-			plainStart = pos
-			continue
-		}
-		switch source[pos] {
+func (p *InlineParser) addLinkAttributeText(parent *Inline, r *inlineByteReader, end int) {
+	plainStart := r.pos
+	for r.pos < end {
+		switch r.current() {
 		case '\\':
-			if pos+1 >= span.End || pos+1 >= lines[0].Span().End || !isASCIIPunctuation(source[pos+1]) {
-				pos++
-				continue
+			if r.next() && r.pos < end && isASCIIPunctuation(r.current()) {
+				if r.prevPos > plainStart {
+					parent.children = append(parent.children, &Inline{
+						kind: TextKind,
+						span: Span{
+							Start: plainStart,
+							End:   r.prevPos,
+						},
+					})
+				}
+				plainStart = r.pos
 			}
-			if plainStart < pos {
+		}
+
+		if !r.next() {
+			break
+		}
+		if r.pos-r.prevPos > 1 {
+			if r.prevPos > plainStart {
 				parent.children = append(parent.children, &Inline{
 					kind: TextKind,
 					span: Span{
 						Start: plainStart,
-						End:   pos,
+						End:   r.prevPos,
 					},
 				})
 			}
-			plainStart = pos + 1
-			pos += 2
-		default:
-			pos++
+			plainStart = r.pos
 		}
 	}
-	if plainStart < span.End {
+	if plainStart < end {
 		parent.children = append(parent.children, &Inline{
 			kind: TextKind,
 			span: Span{
 				Start: plainStart,
-				End:   span.End,
+				End:   end,
 			},
 		})
 	}
@@ -1234,6 +1203,88 @@ func parseHardLineBreakSpace(remaining []byte) (end int, isHardLineBreak bool) {
 		}
 	}
 	return end, true
+}
+
+// An inlineByteReader iterates over [UnparsedKind] spans.
+type inlineByteReader struct {
+	source  []byte
+	spans   []*Inline
+	pos     int
+	prevPos int
+}
+
+func newInlineByteReader(source []byte, spans []*Inline, pos int) *inlineByteReader {
+	return &inlineByteReader{
+		source:  source,
+		spans:   spans,
+		pos:     pos,
+		prevPos: pos - 1,
+	}
+}
+
+func (r *inlineByteReader) current() byte {
+	return r.source[r.pos]
+}
+
+func (r *inlineByteReader) currentNode() *Inline {
+	spanIndex := unparsedIndexForPosition(r.spans, r.pos)
+	if spanIndex < 0 {
+		r.spans = nil
+		return nil
+	}
+	r.spans = r.spans[spanIndex:]
+	return r.spans[0]
+}
+
+func (r *inlineByteReader) next() bool {
+	node := r.currentNode()
+	if node == nil {
+		return false
+	}
+	if r.pos+1 < node.Span().End {
+		r.prevPos = r.pos
+		r.pos++
+		return true
+	}
+
+	// Reached end of line. Advance to next unparsed span.
+	r.spans = r.spans[1:]
+	for ; len(r.spans) > 0; r.spans = r.spans[1:] {
+		if r.spans[0].Kind() == UnparsedKind {
+			r.prevPos = r.pos
+			r.pos = r.spans[0].Span().Start
+			return true
+		}
+	}
+
+	// No next line. Advance position to end of span.
+	r.prevPos = r.pos
+	r.pos++
+	r.spans = nil
+	return false
+}
+
+// unparsedIndexForPosition returns the index
+// of the first [UnparsedKind] inline node in the slice
+// that contains the given position,
+// or -1 if no such node exists.
+// It assumes that the starts of the inline nodes
+// are monotonically increasing.
+func unparsedIndexForPosition(spans []*Inline, i int) int {
+	search := Span{Start: i, End: i + 1}
+	for i, inline := range spans {
+		if inline.Kind() != UnparsedKind {
+			continue
+		}
+		inlineSpan := inline.Span()
+		if inlineSpan.Start > i {
+			return -1
+		}
+		if inline.Span().Intersect(search).Len() > 0 {
+			return i
+		}
+	}
+	return -1
 }
 
 func hasUnparsed(b *Block) bool {
