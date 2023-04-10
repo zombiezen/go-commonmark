@@ -582,7 +582,7 @@ func parseLinkDestination(r *inlineByteReader) linkDestination {
 			}
 		}
 		return linkDestination{span: NullSpan(), text: NullSpan()}
-	case !isASCIIControl(c) && c != ' ':
+	case !isASCIIControl(c) && c != ' ' && c != ')':
 		parenCount := 0
 		start := r.pos
 	loop:
@@ -609,7 +609,7 @@ func parseLinkDestination(r *inlineByteReader) linkDestination {
 				break
 			}
 		}
-		span := Span{Start: start, End: r.prevPos + 1}
+		span := Span{Start: start, End: r.pos}
 		return linkDestination{span: span, text: span}
 	default:
 		return linkDestination{span: NullSpan(), text: NullSpan()}
@@ -627,7 +627,7 @@ func (p *InlineParser) addLinkAttributeText(parent *Inline, r *inlineByteReader,
 						kind: TextKind,
 						span: Span{
 							Start: plainStart,
-							End:   r.prevPos,
+							End:   r.prevPos, // exclude backslash
 						},
 					})
 				}
@@ -638,19 +638,20 @@ func (p *InlineParser) addLinkAttributeText(parent *Inline, r *inlineByteReader,
 		if !r.next() {
 			break
 		}
-		if r.pos-r.prevPos > 1 {
+		if r.jumped() {
 			if r.prevPos > plainStart {
 				parent.children = append(parent.children, &Inline{
 					kind: TextKind,
 					span: Span{
 						Start: plainStart,
-						End:   r.prevPos,
+						End:   r.prevPos + 1,
 					},
 				})
 			}
 			plainStart = r.pos
 		}
 	}
+
 	if plainStart < end {
 		parent.children = append(parent.children, &Inline{
 			kind: TextKind,
@@ -1218,7 +1219,7 @@ func newInlineByteReader(source []byte, spans []*Inline, pos int) *inlineByteRea
 		source:  source,
 		spans:   spans,
 		pos:     pos,
-		prevPos: pos - 1,
+		prevPos: -1,
 	}
 }
 
@@ -1262,6 +1263,10 @@ func (r *inlineByteReader) next() bool {
 	r.pos++
 	r.spans = nil
 	return false
+}
+
+func (r *inlineByteReader) jumped() bool {
+	return r.prevPos >= 0 && r.pos-r.prevPos > 1
 }
 
 // unparsedIndexForPosition returns the index
