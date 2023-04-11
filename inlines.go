@@ -447,11 +447,16 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 			}
 			linkNode.children = append(linkNode.children, destNode)
 		}
-		if info.title.IsValid() {
-			linkNode.children = append(linkNode.children, &Inline{
+		if info.title.span.IsValid() {
+			destNode := &Inline{
 				kind: LinkTitleKind,
-				span: info.title,
-			})
+				span: info.title.span,
+			}
+			if info.title.text.IsValid() {
+				r := newInlineByteReader(state.source, state.unparsed, info.title.text.Start)
+				p.addLinkAttributeText(destNode, r, info.title.text.End)
+			}
+			linkNode.children = append(linkNode.children, destNode)
 		}
 		p.processEmphasis(state, openDelimIndex+1)
 		state.remove(state.stack[openDelimIndex].node)
@@ -480,7 +485,7 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 type inlineLinkInfo struct {
 	span        Span
 	destination linkDestination
-	title       Span
+	title       linkTitle
 }
 
 func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result inlineLinkInfo) {
@@ -489,24 +494,24 @@ func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result in
 	defer func() {
 		// If we successfully parse, advance the spans we're considering.
 		if result.span.IsValid() {
-			if i := unparsedIndexForPosition(state.unparsed, result.span.End); i >= 0 {
+			if i := unparsedIndexForPosition(state.unparsed, result.span.End-1); i >= 0 {
 				state.unparsed = state.unparsed[i:]
 			} else {
 				state.unparsed = nil
 			}
 		}
 	}()
-	// Skip any leading spaces.
-	for r.current() == ' ' && r.current() == '\t' {
-		if !r.next() {
-			return inlineLinkInfo{
+	if !skipLinkSpace(r) {
+		return inlineLinkInfo{
+			span: NullSpan(),
+			destination: linkDestination{
 				span: NullSpan(),
-				destination: linkDestination{
-					span: NullSpan(),
-					text: NullSpan(),
-				},
-				title: NullSpan(),
-			}
+				text: NullSpan(),
+			},
+			title: linkTitle{
+				span: NullSpan(),
+				text: NullSpan(),
+			},
 		}
 	}
 
@@ -515,24 +520,39 @@ func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result in
 			Start: start,
 			End:   -1,
 		},
-		title: NullSpan(),
 	}
 	result.destination = parseLinkDestination(r)
 	if result.destination.span.IsValid() {
-		for r.current() == ' ' && r.current() == '\t' {
-			if !r.next() {
-				return inlineLinkInfo{
+		if !skipLinkSpace(r) {
+			return inlineLinkInfo{
+				span: NullSpan(),
+				destination: linkDestination{
 					span: NullSpan(),
-					destination: linkDestination{
-						span: NullSpan(),
-						text: NullSpan(),
-					},
-					title: NullSpan(),
-				}
+					text: NullSpan(),
+				},
+				title: linkTitle{
+					span: NullSpan(),
+					text: NullSpan(),
+				},
 			}
 		}
 	}
-	// TODO(now): Title
+	result.title = parseLinkTitle(r)
+	if result.title.span.IsValid() {
+		if !skipLinkSpace(r) {
+			return inlineLinkInfo{
+				span: NullSpan(),
+				destination: linkDestination{
+					span: NullSpan(),
+					text: NullSpan(),
+				},
+				title: linkTitle{
+					span: NullSpan(),
+					text: NullSpan(),
+				},
+			}
+		}
+	}
 	if r.current() != ')' {
 		return inlineLinkInfo{
 			span: NullSpan(),
@@ -540,7 +560,10 @@ func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result in
 				span: NullSpan(),
 				text: NullSpan(),
 			},
-			title: NullSpan(),
+			title: linkTitle{
+				span: NullSpan(),
+				text: NullSpan(),
+			},
 		}
 	}
 	result.span.End = r.pos + 1
@@ -614,6 +637,59 @@ func parseLinkDestination(r *inlineByteReader) linkDestination {
 	default:
 		return linkDestination{span: NullSpan(), text: NullSpan()}
 	}
+}
+
+type linkTitle struct {
+	span Span
+	text Span
+}
+
+func parseLinkTitle(r *inlineByteReader) linkTitle {
+	firstChar := r.current()
+	if firstChar != '\'' && firstChar != '"' && firstChar != '(' {
+		return linkTitle{span: NullSpan(), text: NullSpan()}
+	}
+	terminator := firstChar
+	if firstChar == '(' {
+		terminator = ')'
+	}
+
+	start := r.pos
+	for r.next() {
+		switch r.current() {
+		case '\\':
+			if !r.next() {
+				return linkTitle{span: NullSpan(), text: NullSpan()}
+			}
+		case terminator:
+			r.next()
+			return linkTitle{
+				span: Span{
+					Start: start,
+					End:   r.prevPos + 1,
+				},
+				text: Span{
+					Start: start + 1,
+					End:   r.prevPos,
+				},
+			}
+		}
+	}
+	return linkTitle{span: NullSpan(), text: NullSpan()}
+}
+
+func skipLinkSpace(r *inlineByteReader) bool {
+	// Even though the [inline link] spec says to only permit "up to one line ending",
+	// this case is already handled for us by block parsing.
+	//
+	// [inline link]: https://spec.commonmark.org/0.30/#inline-link
+
+	for r.current() == ' ' || r.current() == '\t' || r.current() == '\n' || r.current() == '\r' {
+		if !r.next() {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *InlineParser) addLinkAttributeText(parent *Inline, r *inlineByteReader, end int) {
@@ -1224,6 +1300,9 @@ func newInlineByteReader(source []byte, spans []*Inline, pos int) *inlineByteRea
 }
 
 func (r *inlineByteReader) current() byte {
+	if r.pos >= len(r.source) {
+		return 0
+	}
 	return r.source[r.pos]
 }
 
@@ -1275,14 +1354,14 @@ func (r *inlineByteReader) jumped() bool {
 // or -1 if no such node exists.
 // It assumes that the starts of the inline nodes
 // are monotonically increasing.
-func unparsedIndexForPosition(spans []*Inline, i int) int {
-	search := Span{Start: i, End: i + 1}
+func unparsedIndexForPosition(spans []*Inline, pos int) int {
+	search := Span{Start: pos, End: pos + 1}
 	for i, inline := range spans {
 		if inline.Kind() != UnparsedKind {
 			continue
 		}
 		inlineSpan := inline.Span()
-		if inlineSpan.Start > i {
+		if inlineSpan.Start > pos {
 			return -1
 		}
 		if inline.Span().Intersect(search).Len() > 0 {
