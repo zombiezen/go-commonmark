@@ -868,61 +868,46 @@ closerLoop:
 }
 
 type codeSpan struct {
-	nodeCount int
-	span      Span
-	content   Span
+	span    Span
+	content Span
 }
 
 func (p *InlineParser) parseCodeSpan(state *inlineState, start int) codeSpan {
 	result := codeSpan{
-		span: Span{
-			Start: start,
-			End:   -1,
-		},
-		content: Span{
-			Start: start,
-			End:   -1,
-		},
+		span:    Span{Start: start, End: -1},
+		content: Span{Start: start, End: -1},
 	}
 	backtickLength := 0
-	for result.content.Start < state.spanEnd() && state.source[result.content.Start] == '`' {
+	r := newInlineByteReader(state.source, state.unparsed, start)
+	for r.current() == '`' {
 		backtickLength++
-		result.content.Start++
+		if !r.next() {
+			return result
+		}
+		result.content.Start = r.pos
 	}
 
-	result.content.End = result.content.Start
 	for {
-		if result.content.End >= state.unparsed[result.nodeCount].Span().End {
-			for {
-				result.nodeCount++
-				if result.nodeCount >= len(state.unparsed) {
-					// Hit end of input before encountering end of code span.
-					result.content.End = -1
-					return result
-				}
-				if state.unparsed[result.nodeCount].Kind() == UnparsedKind {
-					break
-				}
+		if r.current() != '`' {
+			if !r.next() {
+				return result
 			}
-			result.content.End = state.unparsed[result.nodeCount].Span().Start
-		}
-
-		if state.source[result.content.End] != '`' {
-			result.content.End++
 			continue
 		}
 		currentRunLength := 1
-		peekPos := result.content.End + 1
-		for peekPos < state.unparsed[result.nodeCount].Span().End && state.source[peekPos] == '`' {
+		potentialEnd := r.pos
+		for r.next() && r.current() == '`' {
 			currentRunLength++
-			peekPos++
 		}
 		if currentRunLength == backtickLength {
-			result.span.End = peekPos
+			result.content.End = potentialEnd
+			result.span.End = r.prevPos + 1
 			return result
 		}
 
-		result.content.End = peekPos
+		if !r.next() {
+			return result
+		}
 	}
 }
 
@@ -956,7 +941,8 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan) {
 		}
 	}
 
-	if cs.nodeCount == 0 {
+	nodeCount := unparsedIndexForPosition(state.unparsed, cs.content.End)
+	if nodeCount == 0 {
 		addSpan(&Inline{
 			kind: TextKind,
 			span: cs.content,
@@ -969,7 +955,7 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan) {
 				End:   state.unparsed[0].Span().End,
 			},
 		})
-		for i := 0; i < cs.nodeCount-1; i++ {
+		for i := 0; i < nodeCount-1; i++ {
 			state.unparsed = state.unparsed[1:]
 			addSpan(&Inline{
 				kind: TextKind,
