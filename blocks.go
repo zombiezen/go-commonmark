@@ -836,6 +836,7 @@ var blocks = map[BlockKind]blockRule{
 			return !p.IsRestBlank()
 		},
 		acceptsLines: true,
+		onClose:      onCloseParagraph,
 	},
 }
 
@@ -984,14 +985,14 @@ func parseCodeFence(line []byte) codeFence {
 		return codeFence{info: NullSpan()}
 	}
 	for i := f.n; i < len(line) && f.info.Start < 0; i++ {
-		if c := line[i]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+		if c := line[i]; !isSpaceTabOrLineEnding(c) {
 			f.info.Start = i
 		}
 	}
 	if f.info.Start >= 0 {
 		// Trim trailing whitespace.
 		for f.info.End = len(line); f.info.End > f.info.Start; f.info.End-- {
-			if c := line[f.info.End-1]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+			if c := line[f.info.End-1]; !isSpaceTabOrLineEnding(c) {
 				break
 			}
 		}
@@ -1058,4 +1059,97 @@ func parseListMarker(line []byte) listMarker {
 
 func (m listMarker) isOrdered() bool {
 	return m.delim == '.' || m.delim == ')'
+}
+
+func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
+	if len(originalBlock.inlineChildren) == 0 {
+		return []*Block{originalBlock}
+	}
+
+	contentStart := originalBlock.inlineChildren[0].Span().Start
+	r := newInlineByteReader(source, originalBlock.inlineChildren, contentStart)
+	var result []*Block
+	for {
+		label := parseLinkLabel(r)
+		if !label.span.IsValid() {
+			break
+		}
+		if r.current() != ':' {
+			break
+		}
+		r.next()
+		if !skipLinkSpace(r) {
+			break
+		}
+		destination := parseLinkDestination(r)
+		if !destination.span.IsValid() {
+			break
+		}
+
+		newBlock := &Block{
+			kind: LinkReferenceDefinitionKind,
+			span: Span{Start: label.span.Start, End: destination.span.End},
+		}
+		result = append(result, newBlock)
+
+		labelInline := &Inline{
+			kind: LinkLabelKind,
+			span: label.inner,
+		}
+		collectLinkAttributeText(
+			labelInline,
+			newInlineByteReader(source, originalBlock.inlineChildren, label.inner.Start),
+			label.inner.End,
+		)
+		newBlock.inlineChildren = append(newBlock.inlineChildren, labelInline)
+
+		destinationInline := &Inline{
+			kind: LinkDestinationKind,
+			span: destination.span,
+		}
+		collectLinkAttributeText(
+			destinationInline,
+			newInlineByteReader(source, originalBlock.inlineChildren, destination.text.Start),
+			destination.text.End,
+		)
+		newBlock.inlineChildren = append(newBlock.inlineChildren, destinationInline)
+
+		if !skipLinkSpace(r) {
+			newBlock.span.End = originalBlock.span.End
+			return result
+		}
+		cloned := *r
+		if title := parseLinkTitle(&cloned); title.span.IsValid() {
+			titleInline := &Inline{
+				kind: LinkTitleKind,
+				span: destination.span,
+			}
+			collectLinkAttributeText(
+				titleInline,
+				newInlineByteReader(source, originalBlock.inlineChildren, title.text.Start),
+				title.text.End,
+			)
+			newBlock.inlineChildren = append(newBlock.inlineChildren, titleInline)
+			*r = cloned
+			newBlock.span.End = title.span.End
+		}
+
+		// Extend block span to end of line.
+		finalLineIndex := unparsedIndexForPosition(originalBlock.inlineChildren, newBlock.span.End-1)
+		newBlock.span.End = originalBlock.inlineChildren[finalLineIndex].Span().End
+		if finalLineIndex+1 < len(originalBlock.inlineChildren) {
+			// TODO(maybe): What if this isn't an unparsed?
+			contentStart = originalBlock.inlineChildren[finalLineIndex+1].Span().Start
+		} else {
+			contentStart = originalBlock.Span().End
+		}
+	}
+
+	if contentStart < originalBlock.Span().End {
+		firstChild := unparsedIndexForPosition(originalBlock.inlineChildren, contentStart)
+		originalBlock.span.Start = contentStart
+		originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
+		result = append(result, originalBlock)
+	}
+	return result
 }

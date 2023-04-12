@@ -528,7 +528,7 @@ func (span Span) String() string {
 
 func isBlankLine(line []byte) bool {
 	for _, b := range line {
-		if !(b == '\r' || b == '\n' || b == ' ' || b == '\t') {
+		if !isSpaceTabOrLineEnding(b) {
 			return false
 		}
 	}
@@ -536,11 +536,12 @@ func isBlankLine(line []byte) bool {
 }
 
 func hasTabOrSpacePrefixOrEOL(line []byte) bool {
-	return len(line) == 0 ||
-		line[0] == ' ' ||
-		line[0] == '\t' ||
-		line[0] == '\n' ||
-		line[0] == '\r'
+	return len(line) == 0 || isSpaceTabOrLineEnding(line[0])
+}
+
+// isSpaceTabOrLineEnding reports whether c is a space, tab, or line ending character.
+func isSpaceTabOrLineEnding(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 func isASCIIDigit(c byte) bool {
@@ -562,7 +563,7 @@ func isASCIIControl(c byte) bool {
 //
 // [Unicode whitespace character]: https://spec.commonmark.org/0.30/#unicode-whitespace-character
 func isUnicodeWhitespace(c rune) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || unicode.Is(unicode.Zs, c)
+	return (c <= 0x7f && isSpaceTabOrLineEnding(byte(c))) || unicode.Is(unicode.Zs, c)
 }
 
 // isUnicodePunctuation reports whether the code point is a [Unicode punctuation character].

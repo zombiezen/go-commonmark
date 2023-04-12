@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/text/cases"
 )
 
 // Inline represents CommonMark content elements like text, links, or emphasis.
@@ -57,6 +59,9 @@ func (inline *Inline) IndentWidth() int {
 }
 
 // Text converts a non-container inline node into a string.
+// For [LinkLabelKind], Text returns the [normalized form] of the label.
+//
+// [normalized form]: https://spec.commonmark.org/0.30/#matches
 func (inline *Inline) Text(source []byte) string {
 	switch inline.Kind() {
 	case TextKind:
@@ -79,6 +84,32 @@ func (inline *Inline) Text(source []byte) string {
 			}
 		}
 		return sb.String()
+	case LinkLabelKind:
+		sb := new(strings.Builder)
+		sb.Grow(inline.Span().Len())
+		r := newInlineByteReader(source, inline.children, inline.children[0].Span().Start)
+		end := inline.children[len(inline.children)-1].Span().End
+		for r.pos < end {
+			c := r.current()
+			if isSpaceTabOrLineEnding(c) {
+				// Collapse consecutive whitespace to a single space.
+				sb.WriteByte(' ')
+				if !r.next() {
+					break
+				}
+				for r.pos < end && isSpaceTabOrLineEnding(r.current()) {
+					if !r.next() {
+						break
+					}
+				}
+			} else {
+				sb.WriteByte(c)
+				if !r.next() {
+					break
+				}
+			}
+		}
+		return cases.Fold().String(sb.String())
 	default:
 		return ""
 	}
@@ -141,6 +172,7 @@ const (
 	ImageKind
 	LinkDestinationKind
 	LinkTitleKind
+	LinkLabelKind
 
 	CodeSpanKind
 	AutolinkKind
@@ -443,7 +475,7 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 			}
 			if info.destination.text.IsValid() {
 				r := newInlineByteReader(state.source, state.unparsed, info.destination.text.Start)
-				p.addLinkAttributeText(destNode, r, info.destination.text.End)
+				collectLinkAttributeText(destNode, r, info.destination.text.End)
 			}
 			linkNode.children = append(linkNode.children, destNode)
 		}
@@ -454,7 +486,7 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 			}
 			if info.title.text.IsValid() {
 				r := newInlineByteReader(state.source, state.unparsed, info.title.text.Start)
-				p.addLinkAttributeText(destNode, r, info.title.text.End)
+				collectLinkAttributeText(destNode, r, info.title.text.End)
 			}
 			linkNode.children = append(linkNode.children, destNode)
 		}
@@ -678,13 +710,77 @@ func parseLinkTitle(r *inlineByteReader) linkTitle {
 	return linkTitle{span: NullSpan(), text: NullSpan()}
 }
 
+type linkLabel struct {
+	span  Span
+	inner Span
+}
+
+// parseLinkLabel parses a [link label].
+//
+// [link label]: https://spec.commonmark.org/0.30/#link-label
+func parseLinkLabel(r *inlineByteReader) linkLabel {
+	// "A link label can have at most 999 characters inside the square brackets."
+	const maxChars = 999
+
+	if r.current() != '[' {
+		return linkLabel{NullSpan(), NullSpan()}
+	}
+	result := linkLabel{
+		span:  Span{Start: r.pos, End: -1},
+		inner: NullSpan(),
+	}
+
+	// Skip initial spaces.
+	chars := 0
+	for {
+		if !r.next() {
+			return linkLabel{NullSpan(), NullSpan()}
+		}
+		chars++
+		c := r.current()
+		if chars >= maxChars || c == '[' || c == ']' {
+			return linkLabel{NullSpan(), NullSpan()}
+		}
+		if !isSpaceTabOrLineEnding(c) {
+			break
+		}
+	}
+	result.inner.Start = r.pos
+
+	// Consume rest of the label text.
+	for ; chars < maxChars && r.current() != '[' && r.current() != ']'; chars++ {
+		if r.current() == '\\' {
+			result.inner.End = r.pos + 1
+			chars++
+			if !r.next() {
+				return linkLabel{NullSpan(), NullSpan()}
+			}
+			if !isSpaceTabOrLineEnding(r.current()) {
+				result.inner.End = r.pos + 1
+			}
+		} else if !isSpaceTabOrLineEnding(r.current()) {
+			result.inner.End = r.pos + 1
+		}
+		if !r.next() {
+			return linkLabel{NullSpan(), NullSpan()}
+		}
+	}
+
+	if r.current() != ']' {
+		return linkLabel{NullSpan(), NullSpan()}
+	}
+	result.span.End = r.pos + 1
+	r.next()
+	return result
+}
+
 func skipLinkSpace(r *inlineByteReader) bool {
 	// Even though the [inline link] spec says to only permit "up to one line ending",
 	// this case is already handled for us by block parsing.
 	//
 	// [inline link]: https://spec.commonmark.org/0.30/#inline-link
 
-	for r.current() == ' ' || r.current() == '\t' || r.current() == '\n' || r.current() == '\r' {
+	for isSpaceTabOrLineEnding(r.current()) {
 		if !r.next() {
 			return false
 		}
@@ -692,7 +788,7 @@ func skipLinkSpace(r *inlineByteReader) bool {
 	return true
 }
 
-func (p *InlineParser) addLinkAttributeText(parent *Inline, r *inlineByteReader, end int) {
+func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int) {
 	plainStart := r.pos
 	for r.pos < end {
 		switch r.current() {
@@ -957,10 +1053,12 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan) {
 		})
 		for i := 0; i < nodeCount-1; i++ {
 			state.unparsed = state.unparsed[1:]
-			addSpan(&Inline{
-				kind: TextKind,
-				span: state.unparsed[0].Span(),
-			})
+			if state.unparsed[0].Kind() == UnparsedKind {
+				addSpan(&Inline{
+					kind: TextKind,
+					span: state.unparsed[0].Span(),
+				})
+			}
 		}
 		state.unparsed = state.unparsed[1:]
 		addSpan(&Inline{
