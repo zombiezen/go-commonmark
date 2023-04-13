@@ -59,7 +59,6 @@ var supportedSections = map[string]struct{}{
 var skippedExamples = map[int]string{
 	20:  "autolinks not implemented",
 	21:  "raw HTML not implemented",
-	23:  "link reference definitions not implemented",
 	59:  "setext headings not implemented",
 	115: "setext headings not implemented",
 	141: "setext headings not implemented",
@@ -67,7 +66,6 @@ var skippedExamples = map[int]string{
 	300: "setext headings not implemented",
 	308: "HTML comments not implemented",
 	309: "HTML comments not implemented",
-	317: "link reference definitions not implemented",
 	344: "raw HTML not implemented",
 	346: "autolinks not implemented",
 	474: "raw HTML not implemented",
@@ -83,46 +81,9 @@ var skippedExamples = map[int]string{
 	519: "images not implemented",
 	523: "raw HTML not implemented",
 	525: "autolinks not implemented",
-	526: "link reference definitions not implemented",
-	527: "link reference definitions not implemented",
-	528: "link reference definitions not implemented",
-	529: "link reference definitions not implemented",
-	530: "images and link reference definitions not implemented",
-	531: "link reference definitions not implemented",
-	532: "link reference definitions not implemented",
-	533: "link reference definitions not implemented",
-	534: "link reference definitions not implemented",
-	535: "link reference definitions not implemented",
-	536: "link reference definitions not implemented",
-	537: "link reference definitions not implemented",
-	538: "link reference definitions not implemented",
-	539: "link reference definitions not implemented",
-	540: "link reference definitions not implemented",
-	541: "link reference definitions not implemented",
-	542: "link reference definitions not implemented",
-	543: "link reference definitions not implemented",
-	544: "link reference definitions not implemented",
-	548: "link reference definitions not implemented",
-	549: "link reference definitions not implemented",
-	552: "link reference definitions not implemented",
-	553: "link reference definitions not implemented",
-	554: "link reference definitions not implemented",
-	555: "link reference definitions not implemented",
-	556: "link reference definitions not implemented",
-	557: "link reference definitions not implemented",
-	558: "link reference definitions not implemented",
-	559: "link reference definitions not implemented",
-	560: "link reference definitions not implemented",
-	561: "link reference definitions not implemented",
-	562: "link reference definitions not implemented",
-	563: "link reference definitions not implemented",
-	564: "link reference definitions not implemented",
-	565: "link reference definitions not implemented",
-	566: "link reference definitions not implemented",
-	567: "link reference definitions not implemented",
-	568: "link reference definitions not implemented",
-	569: "link reference definitions not implemented",
-	570: "link reference definitions not implemented",
+	530: "images not implemented",
+	535: "raw HTML not implemented",
+	537: "autolinks not implemented",
 	642: "raw HTML not implemented",
 	643: "raw HTML not implemented",
 }
@@ -150,9 +111,9 @@ func TestSpec(t *testing.T) {
 			if skipReason := skippedExamples[test.Example]; skipReason != "" {
 				t.Skip("Skipped:", skipReason)
 			}
-			blocks := Parse([]byte(test.Markdown))
+			blocks, refMap := Parse([]byte(test.Markdown))
 			buf := new(bytes.Buffer)
-			if err := RenderHTML(buf, blocks); err != nil {
+			if err := RenderHTML(buf, blocks, refMap); err != nil {
 				t.Error("RenderHTML:", err)
 			}
 			got := string(normalizeHTML(buf.Bytes()))

@@ -193,6 +193,12 @@ const (
 	IndentedCodeBlockKind
 	FencedCodeBlockKind
 	HTMLBlockKind
+	// LinkReferenceDefinitionKind is used for a [link reference definition].
+	// The first child is always a [LinkLabelKind],
+	// the second child is always a [LinkDestinationKind],
+	// and it may end with an optional [LinkTitleKind].
+	//
+	// [link reference definition]: https://spec.commonmark.org/0.30/#link-reference-definition
 	LinkReferenceDefinitionKind
 	BlockQuoteKind
 	ListItemKind
@@ -1095,11 +1101,13 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 		labelInline := &Inline{
 			kind: LinkLabelKind,
 			span: label.inner,
+			ref:  transformLinkReferenceSpan(source, originalBlock.inlineChildren, label.inner),
 		}
 		collectLinkAttributeText(
 			labelInline,
 			newInlineByteReader(source, originalBlock.inlineChildren, label.inner.Start),
 			label.inner.End,
+			false,
 		)
 		newBlock.inlineChildren = append(newBlock.inlineChildren, labelInline)
 
@@ -1111,6 +1119,7 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 			destinationInline,
 			newInlineByteReader(source, originalBlock.inlineChildren, destination.text.Start),
 			destination.text.End,
+			true,
 		)
 		newBlock.inlineChildren = append(newBlock.inlineChildren, destinationInline)
 
@@ -1128,6 +1137,7 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 				titleInline,
 				newInlineByteReader(source, originalBlock.inlineChildren, title.text.Start),
 				title.text.End,
+				true,
 			)
 			newBlock.inlineChildren = append(newBlock.inlineChildren, titleInline)
 			*r = cloned
@@ -1135,7 +1145,7 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 		}
 
 		// Extend block span to end of line.
-		finalLineIndex := unparsedIndexForPosition(originalBlock.inlineChildren, newBlock.span.End-1)
+		finalLineIndex := nodeIndexForPosition(originalBlock.inlineChildren, newBlock.span.End-1)
 		newBlock.span.End = originalBlock.inlineChildren[finalLineIndex].Span().End
 		if finalLineIndex+1 < len(originalBlock.inlineChildren) {
 			// TODO(maybe): What if this isn't an unparsed?
@@ -1146,7 +1156,7 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 	}
 
 	if contentStart < originalBlock.Span().End {
-		firstChild := unparsedIndexForPosition(originalBlock.inlineChildren, contentStart)
+		firstChild := nodeIndexForPosition(originalBlock.inlineChildren, contentStart)
 		originalBlock.span.Start = contentStart
 		originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
 		result = append(result, originalBlock)

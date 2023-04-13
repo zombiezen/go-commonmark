@@ -29,6 +29,7 @@ type Inline struct {
 	kind     InlineKind
 	span     Span
 	indent   int
+	ref      string
 	children []*Inline
 }
 
@@ -59,9 +60,6 @@ func (inline *Inline) IndentWidth() int {
 }
 
 // Text converts a non-container inline node into a string.
-// For [LinkLabelKind], Text returns the [normalized form] of the label.
-//
-// [normalized form]: https://spec.commonmark.org/0.30/#matches
 func (inline *Inline) Text(source []byte) string {
 	switch inline.Kind() {
 	case TextKind:
@@ -84,32 +82,6 @@ func (inline *Inline) Text(source []byte) string {
 			}
 		}
 		return sb.String()
-	case LinkLabelKind:
-		sb := new(strings.Builder)
-		sb.Grow(inline.Span().Len())
-		r := newInlineByteReader(source, inline.children, inline.children[0].Span().Start)
-		end := inline.children[len(inline.children)-1].Span().End
-		for r.pos < end {
-			c := r.current()
-			if isSpaceTabOrLineEnding(c) {
-				// Collapse consecutive whitespace to a single space.
-				sb.WriteByte(' ')
-				if !r.next() {
-					break
-				}
-				for r.pos < end && isSpaceTabOrLineEnding(r.current()) {
-					if !r.next() {
-						break
-					}
-				}
-			} else {
-				sb.WriteByte(c)
-				if !r.next() {
-					break
-				}
-			}
-		}
-		return cases.Fold().String(sb.String())
 	default:
 		return ""
 	}
@@ -141,6 +113,55 @@ func (inline *Inline) LinkTitle() *Inline {
 		}
 	}
 	return nil
+}
+
+// LinkReference returns the [normalized form] of a link label.
+//
+// [normalized form]: https://spec.commonmark.org/0.30/#matches
+func (inline *Inline) LinkReference() string {
+	if inline.Kind() == LinkKind && len(inline.children) > 0 {
+		if last := inline.children[len(inline.children)-1]; last.Kind() == LinkLabelKind {
+			// Full reference link.
+			return last.LinkReference()
+		}
+	}
+	return inline.ref
+}
+
+func transformLinkReference(source []byte, nodes []*Inline) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	return transformLinkReferenceSpan(source, nodes, Span{
+		Start: nodes[0].Span().Start,
+		End:   nodes[len(nodes)-1].Span().End,
+	})
+}
+
+func transformLinkReferenceSpan(source []byte, nodes []*Inline, span Span) string {
+	sb := new(strings.Builder)
+	r := newInlineByteReader(source, nodes, span.Start)
+	for r.pos < span.End {
+		c := r.current()
+		if isSpaceTabOrLineEnding(c) {
+			// Collapse consecutive whitespace to a single space.
+			sb.WriteByte(' ')
+			if !r.next() {
+				break
+			}
+			for r.pos < span.End && isSpaceTabOrLineEnding(r.current()) {
+				if !r.next() {
+					break
+				}
+			}
+		} else {
+			sb.WriteByte(c)
+			if !r.next() {
+				break
+			}
+		}
+	}
+	return cases.Fold().String(strings.TrimSpace(sb.String()))
 }
 
 // ChildCount returns the number of children the node has.
@@ -185,6 +206,7 @@ const (
 // An InlineParser converts [UnparsedKind] [Inline] nodes
 // into inline trees.
 type InlineParser struct {
+	ReferenceMatcher ReferenceMatcher
 }
 
 // Rewrite replaces any [UnparsedKind] nodes in the given root block
@@ -211,21 +233,22 @@ type inlineState struct {
 	root             *Inline
 	source           []byte
 	unparsed         []*Inline
+	unparsedPos      int
 	blockKind        BlockKind
 	stack            []delimiterStackElement
 	ignoreNextIndent bool
 	parentMap        map[*Inline]*Inline
 }
 
-func (p *inlineState) spanEnd() int {
-	if len(p.unparsed) == 0 {
-		return len(p.source)
+func (state *inlineState) spanEnd() int {
+	if state.unparsedPos >= len(state.unparsed) {
+		return len(state.source)
 	}
-	return p.unparsed[0].Span().End
+	return state.unparsed[state.unparsedPos].Span().End
 }
 
-func (p *inlineState) isLastSpan() bool {
-	return len(p.unparsed) <= 1
+func (state *inlineState) isLastSpan() bool {
+	return state.unparsedPos >= len(state.unparsed)-1
 }
 
 func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
@@ -239,19 +262,19 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 		unparsed:  container.inlineChildren,
 		parentMap: make(map[*Inline]*Inline),
 	}
-	for ; len(state.unparsed) > 0; state.unparsed = state.unparsed[1:] {
-		switch state.unparsed[0].Kind() {
+	for ; state.unparsedPos < len(state.unparsed); state.unparsedPos++ {
+		switch state.unparsed[state.unparsedPos].Kind() {
 		case 0:
 			state.ignoreNextIndent = false
 		case IndentKind:
 			if !state.ignoreNextIndent {
-				dummy.children = append(dummy.children, state.unparsed[0])
+				dummy.children = append(dummy.children, state.unparsed[state.unparsedPos])
 			}
 			state.ignoreNextIndent = false
 		case UnparsedKind:
 			state.ignoreNextIndent = false
-			plainStart := state.unparsed[0].Span().Start
-			for pos := plainStart; len(state.unparsed) > 0 && pos < state.spanEnd(); {
+			plainStart := state.unparsed[state.unparsedPos].Span().Start
+			for pos := plainStart; state.unparsedPos < len(state.unparsed) && pos < state.spanEnd(); {
 				switch source[pos] {
 				case '*', '_':
 					state.addToRoot(&Inline{
@@ -358,7 +381,7 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 			})
 		default:
 			state.ignoreNextIndent = false
-			dummy.children = append(dummy.children, state.unparsed[0])
+			dummy.children = append(dummy.children, state.unparsed[state.unparsedPos])
 		}
 	}
 	p.processEmphasis(state, 0)
@@ -452,11 +475,69 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 	if state.stack[openDelimIndex].typ == inlineDelimiterImage {
 		kind = ImageKind
 	}
-	// TODO(soon): Add more link types.
+
+	// Attempt as inline link first,
+	// but fall back to shortcut reference link below.
+	if start+1 < state.spanEnd() && state.source[start+1] == '(' {
+		if info := p.parseInlineLink(state, start+1); info.span.IsValid() {
+			linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
+			if info.destination.span.IsValid() {
+				destNode := &Inline{
+					kind: LinkDestinationKind,
+					span: info.destination.span,
+				}
+				if info.destination.text.IsValid() {
+					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], info.destination.text.Start)
+					collectLinkAttributeText(destNode, r, info.destination.text.End, true)
+				}
+				linkNode.children = append(linkNode.children, destNode)
+			}
+			if info.title.span.IsValid() {
+				destNode := &Inline{
+					kind: LinkTitleKind,
+					span: info.title.span,
+				}
+				if info.title.text.IsValid() {
+					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], info.title.text.Start)
+					collectLinkAttributeText(destNode, r, info.title.text.End, true)
+				}
+				linkNode.children = append(linkNode.children, destNode)
+			}
+			p.finishLink(state, kind, openDelimIndex)
+			return info.span.End
+		}
+	}
+
 	switch {
-	case start+1 < state.spanEnd() && state.source[start+1] == '(':
-		info := p.parseInlineLink(state, start+1)
-		if !info.span.IsValid() {
+	case start+2 < state.spanEnd() && state.source[start+1] == '[' && state.source[start+2] == ']':
+		// Collapsed reference link.
+
+		// Since we're backtracking, we use the full state.unparsed rather than a slice.
+		normalizedLabel := transformLinkReferenceSpan(state.source, state.unparsed, Span{
+			Start: state.stack[openDelimIndex].node.Span().End,
+			End:   start,
+		})
+		if p.ReferenceMatcher == nil || !p.ReferenceMatcher.MatchReference(normalizedLabel) {
+			state.addToRoot(&Inline{
+				kind: TextKind,
+				span: Span{
+					Start: start,
+					End:   start + 3,
+				},
+			})
+			state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
+			return start + 3
+		}
+
+		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
+		linkNode.ref = normalizedLabel
+		linkNode.span.End = start + 3
+		p.finishLink(state, kind, openDelimIndex)
+		return linkNode.span.End
+	case start+1 < state.spanEnd() && state.source[start+1] == '[':
+		// Full reference link.
+		label := parseLinkLabel(newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], start+1))
+		if !label.span.IsValid() {
 			state.addToRoot(&Inline{
 				kind: TextKind,
 				span: Span{
@@ -464,53 +545,75 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 					End:   start + 1,
 				},
 			})
+			state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
+			return start + 1
+		}
+		inlineLabel := &Inline{
+			kind: LinkLabelKind,
+			span: label.span,
+		}
+		collectLinkAttributeText(
+			inlineLabel,
+			newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], label.inner.Start),
+			label.inner.End,
+			false,
+		)
+		inlineLabel.ref = transformLinkReference(state.source, inlineLabel.children)
+		if p.ReferenceMatcher == nil || !p.ReferenceMatcher.MatchReference(inlineLabel.ref) {
+			state.addToRoot(&Inline{
+				kind: TextKind,
+				span: Span{
+					Start: start,
+					End:   start + 1,
+				},
+			})
+			state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
 			return start + 1
 		}
 
 		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
-		if info.destination.span.IsValid() {
-			destNode := &Inline{
-				kind: LinkDestinationKind,
-				span: info.destination.span,
-			}
-			if info.destination.text.IsValid() {
-				r := newInlineByteReader(state.source, state.unparsed, info.destination.text.Start)
-				collectLinkAttributeText(destNode, r, info.destination.text.End)
-			}
-			linkNode.children = append(linkNode.children, destNode)
-		}
-		if info.title.span.IsValid() {
-			destNode := &Inline{
-				kind: LinkTitleKind,
-				span: info.title.span,
-			}
-			if info.title.text.IsValid() {
-				r := newInlineByteReader(state.source, state.unparsed, info.title.text.Start)
-				collectLinkAttributeText(destNode, r, info.title.text.End)
-			}
-			linkNode.children = append(linkNode.children, destNode)
-		}
-		p.processEmphasis(state, openDelimIndex+1)
-		state.remove(state.stack[openDelimIndex].node)
-		state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
-		if kind == LinkKind {
-			for i := range state.stack[:openDelimIndex] {
-				if state.stack[i].typ == inlineDelimiterLink {
-					state.stack[i].flags &^= activeFlag
-				}
-			}
-		}
-		return info.span.End
+		linkNode.children = append(linkNode.children, inlineLabel)
+		linkNode.span.End = label.span.End
+		p.finishLink(state, kind, openDelimIndex)
+		return linkNode.span.End
 	default:
-		state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
-		state.addToRoot(&Inline{
-			kind: TextKind,
-			span: Span{
-				Start: start,
-				End:   start + 1,
-			},
+		// Shortcut reference link.
+
+		// Since we're backtracking, we use the full state.unparsed rather than a slice.
+		normalizedLabel := transformLinkReferenceSpan(state.source, state.unparsed, Span{
+			Start: state.stack[openDelimIndex].node.Span().End,
+			End:   start,
 		})
-		return start + 1
+		if p.ReferenceMatcher == nil || !p.ReferenceMatcher.MatchReference(normalizedLabel) {
+			state.addToRoot(&Inline{
+				kind: TextKind,
+				span: Span{
+					Start: start,
+					End:   start + 1,
+				},
+			})
+			state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
+			return start + 1
+		}
+
+		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
+		linkNode.ref = normalizedLabel
+		linkNode.span.End = start + 1
+		p.finishLink(state, kind, openDelimIndex)
+		return linkNode.span.End
+	}
+}
+
+func (p *InlineParser) finishLink(state *inlineState, kind InlineKind, openDelimIndex int) {
+	p.processEmphasis(state, openDelimIndex+1)
+	state.remove(state.stack[openDelimIndex].node)
+	state.stack = deleteDelimiterStack(state.stack, openDelimIndex, openDelimIndex+1)
+	if kind == LinkKind {
+		for i := range state.stack[:openDelimIndex] {
+			if state.stack[i].typ == inlineDelimiterLink {
+				state.stack[i].flags &^= activeFlag
+			}
+		}
 	}
 }
 
@@ -522,14 +625,14 @@ type inlineLinkInfo struct {
 
 func (p *InlineParser) parseInlineLink(state *inlineState, start int) (result inlineLinkInfo) {
 	// Skip initial opening parenthesis.
-	r := newInlineByteReader(state.source, state.unparsed, start+1)
+	r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], start+1)
 	defer func() {
 		// If we successfully parse, advance the spans we're considering.
 		if result.span.IsValid() {
-			if i := unparsedIndexForPosition(state.unparsed, result.span.End-1); i >= 0 {
-				state.unparsed = state.unparsed[i:]
+			if i := nodeIndexForPosition(state.unparsed[state.unparsedPos:], result.span.End-1); i >= 0 {
+				state.unparsedPos += i
 			} else {
-				state.unparsed = nil
+				state.unparsedPos = len(state.unparsed)
 			}
 		}
 	}()
@@ -788,11 +891,30 @@ func skipLinkSpace(r *inlineByteReader) bool {
 	return true
 }
 
-func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int) {
+func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int, escapes bool) {
 	plainStart := r.pos
 	for r.pos < end {
-		switch r.current() {
-		case '\\':
+		curr := r.currentNode()
+		if curr.Kind() == IndentKind {
+			// Encountered an indent node.
+			// Copy it over verbatim and skip it.
+			if r.pos > plainStart {
+				parent.children = append(parent.children, &Inline{
+					kind: TextKind,
+					span: Span{
+						Start: plainStart,
+						End:   r.prevPos + 1,
+					},
+				})
+			}
+			parent.children = append(parent.children, curr)
+			for r.next() && r.currentNode() == curr {
+			}
+			plainStart = r.pos
+			continue
+		}
+
+		if escapes && curr.Kind() == UnparsedKind && r.current() == '\\' {
 			if r.next() && r.pos < end && isASCIIPunctuation(r.current()) {
 				if r.prevPos > plainStart {
 					parent.children = append(parent.children, &Inline{
@@ -974,7 +1096,7 @@ func (p *InlineParser) parseCodeSpan(state *inlineState, start int) codeSpan {
 		content: Span{Start: start, End: -1},
 	}
 	backtickLength := 0
-	r := newInlineByteReader(state.source, state.unparsed, start)
+	r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], start)
 	for r.current() == '`' {
 		backtickLength++
 		if !r.next() {
@@ -1037,7 +1159,7 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan) {
 		}
 	}
 
-	nodeCount := unparsedIndexForPosition(state.unparsed, cs.content.End)
+	nodeCount := nodeIndexForPosition(state.unparsed[state.unparsedPos:], cs.content.End)
 	if nodeCount == 0 {
 		addSpan(&Inline{
 			kind: TextKind,
@@ -1048,23 +1170,23 @@ func (p *InlineParser) collectCodeSpan(state *inlineState, cs codeSpan) {
 			kind: TextKind,
 			span: Span{
 				Start: cs.content.Start,
-				End:   state.unparsed[0].Span().End,
+				End:   state.unparsed[state.unparsedPos].Span().End,
 			},
 		})
 		for i := 0; i < nodeCount-1; i++ {
-			state.unparsed = state.unparsed[1:]
-			if state.unparsed[0].Kind() == UnparsedKind {
+			state.unparsedPos++
+			if state.unparsed[state.unparsedPos].Kind() == UnparsedKind {
 				addSpan(&Inline{
 					kind: TextKind,
-					span: state.unparsed[0].Span(),
+					span: state.unparsed[state.unparsedPos].Span(),
 				})
 			}
 		}
-		state.unparsed = state.unparsed[1:]
+		state.unparsedPos++
 		addSpan(&Inline{
 			kind: TextKind,
 			span: Span{
-				Start: state.unparsed[0].Span().Start,
+				Start: state.unparsed[state.unparsedPos].Span().Start,
 				End:   cs.content.End,
 			},
 		})
@@ -1216,14 +1338,12 @@ func (state *inlineState) wrap(kind InlineKind, startNode, endNode *Inline) *Inl
 	if len(parent.children) == 0 || parent.children[startIndex-1] != startNode {
 		panic("could not find startNode")
 	}
-
 	endIndex := startIndex
 	for ; endIndex < len(parent.children); endIndex++ {
 		if parent.children[endIndex] == endNode {
 			break
 		}
 	}
-
 	newNode.children = append(newNode.children, parent.children[startIndex:endIndex]...)
 
 	if startIndex == endIndex {
@@ -1366,12 +1486,13 @@ func parseHardLineBreakSpace(remaining []byte) (end int, isHardLineBreak bool) {
 	return end, true
 }
 
-// An inlineByteReader iterates over [UnparsedKind] spans.
+// An inlineByteReader transforms inline nodes into a text stream.
 type inlineByteReader struct {
-	source  []byte
-	spans   []*Inline
-	pos     int
-	prevPos int
+	source    []byte
+	spans     []*Inline
+	pos       int
+	indentPos int
+	prevPos   int
 }
 
 func newInlineByteReader(source []byte, spans []*Inline, pos int) *inlineByteReader {
@@ -1387,11 +1508,14 @@ func (r *inlineByteReader) current() byte {
 	if r.pos >= len(r.source) {
 		return 0
 	}
+	if r.currentNode().Kind() == IndentKind {
+		return ' '
+	}
 	return r.source[r.pos]
 }
 
 func (r *inlineByteReader) currentNode() *Inline {
-	spanIndex := unparsedIndexForPosition(r.spans, r.pos)
+	spanIndex := nodeIndexForPosition(r.spans, r.pos)
 	if spanIndex < 0 {
 		r.spans = nil
 		return nil
@@ -1405,18 +1529,26 @@ func (r *inlineByteReader) next() bool {
 	if node == nil {
 		return false
 	}
-	if r.pos+1 < node.Span().End {
+
+	// Advance within node if possible.
+	if node.Kind() == IndentKind && r.indentPos < node.IndentWidth() {
+		r.prevPos = r.pos
+		r.indentPos++
+		return true
+	}
+	if node.Kind() != IndentKind && r.pos+1 < node.Span().End {
 		r.prevPos = r.pos
 		r.pos++
 		return true
 	}
 
-	// Reached end of line. Advance to next unparsed span.
+	// Reached end of node. Advance to next inline node.
 	r.spans = r.spans[1:]
 	for ; len(r.spans) > 0; r.spans = r.spans[1:] {
-		if r.spans[0].Kind() == UnparsedKind {
+		if k := r.spans[0].Kind(); k == UnparsedKind || k == TextKind || k == IndentKind {
 			r.prevPos = r.pos
 			r.pos = r.spans[0].Span().Start
+			r.indentPos = 0
 			return true
 		}
 	}
@@ -1432,18 +1564,15 @@ func (r *inlineByteReader) jumped() bool {
 	return r.prevPos >= 0 && r.pos-r.prevPos > 1
 }
 
-// unparsedIndexForPosition returns the index
-// of the first [UnparsedKind] inline node in the slice
+// nodeIndexForPosition returns the index
+// of the first inline node in the slice
 // that contains the given position,
 // or -1 if no such node exists.
 // It assumes that the starts of the inline nodes
 // are monotonically increasing.
-func unparsedIndexForPosition(spans []*Inline, pos int) int {
+func nodeIndexForPosition(spans []*Inline, pos int) int {
 	search := Span{Start: pos, End: pos + 1}
 	for i, inline := range spans {
-		if inline.Kind() != UnparsedKind {
-			continue
-		}
 		inlineSpan := inline.Span()
 		if inlineSpan.Start > pos {
 			return -1

@@ -25,14 +25,14 @@ import (
 	"unicode/utf8"
 )
 
-func RenderHTML(w io.Writer, blocks []*RootBlock) error {
+func RenderHTML(w io.Writer, blocks []*RootBlock, refMap ReferenceMap) error {
 	var buf []byte
 	for i, b := range blocks {
 		buf = buf[:0]
 		if i > 0 {
 			buf = append(buf, "\n\n"...)
 		}
-		buf = appendHTML(buf, b.Source, &b.Block)
+		buf = appendHTML(buf, b.Source, refMap, &b.Block)
 		if _, err := w.Write(buf); err != nil {
 			return fmt.Errorf("render markdown to html: %w", err)
 		}
@@ -40,11 +40,11 @@ func RenderHTML(w io.Writer, blocks []*RootBlock) error {
 	return nil
 }
 
-func appendHTML(dst []byte, source []byte, block *Block) []byte {
+func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []byte {
 	switch block.Kind() {
 	case ParagraphKind:
 		dst = append(dst, "<p>"...)
-		dst = appendChildrenHTML(dst, source, block, false)
+		dst = appendChildrenHTML(dst, source, refMap, block, false)
 		dst = append(dst, "</p>"...)
 	case ThematicBreakKind:
 		dst = append(dst, "<hr>"...)
@@ -53,7 +53,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		dst = append(dst, "<h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
-		dst = appendChildrenHTML(dst, source, block, false)
+		dst = appendChildrenHTML(dst, source, refMap, block, false)
 		dst = append(dst, "</h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
@@ -68,11 +68,11 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 			}
 		}
 		dst = append(dst, ">"...)
-		dst = appendChildrenHTML(dst, source, block, false)
+		dst = appendChildrenHTML(dst, source, refMap, block, false)
 		dst = append(dst, "</code></pre>"...)
 	case BlockQuoteKind:
 		dst = append(dst, "<blockquote>"...)
-		dst = appendChildrenHTML(dst, source, block, false)
+		dst = appendChildrenHTML(dst, source, refMap, block, false)
 		dst = append(dst, "</blockquote>"...)
 	case ListKind:
 		if block.IsOrderedList() {
@@ -86,7 +86,7 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		} else {
 			dst = append(dst, "<ul>"...)
 		}
-		dst = appendChildrenHTML(dst, source, block, false)
+		dst = appendChildrenHTML(dst, source, refMap, block, false)
 		if block.IsOrderedList() {
 			dst = append(dst, "</ol>"...)
 		} else {
@@ -94,31 +94,31 @@ func appendHTML(dst []byte, source []byte, block *Block) []byte {
 		}
 	case ListItemKind:
 		dst = append(dst, "<li>"...)
-		dst = appendChildrenHTML(dst, source, block, block.IsTightList())
+		dst = appendChildrenHTML(dst, source, refMap, block, block.IsTightList())
 		dst = append(dst, "</li>"...)
 	}
 	return dst
 }
 
-func appendChildrenHTML(dst []byte, source []byte, parent *Block, tight bool) []byte {
+func appendChildrenHTML(dst []byte, source []byte, refMap ReferenceMap, parent *Block, tight bool) []byte {
 	switch {
 	case parent != nil && len(parent.inlineChildren) > 0:
 		for _, c := range parent.inlineChildren {
-			dst = appendInlineHTML(dst, source, c)
+			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 	case parent != nil && len(parent.blockChildren) > 0:
 		for _, c := range parent.blockChildren {
 			if tight && c.Kind() == ParagraphKind {
-				dst = appendChildrenHTML(dst, source, c, false)
+				dst = appendChildrenHTML(dst, source, refMap, c, false)
 			} else {
-				dst = appendHTML(dst, source, c)
+				dst = appendHTML(dst, source, refMap, c)
 			}
 		}
 	}
 	return dst
 }
 
-func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
+func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *Inline) []byte {
 	switch inline.Kind() {
 	case TextKind, UnparsedKind:
 		dst = append(dst, html.EscapeString(inline.Text(source))...)
@@ -129,33 +129,44 @@ func appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
 	case EmphasisKind:
 		dst = append(dst, "<em>"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, c)
+			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 		dst = append(dst, "</em>"...)
 	case StrongKind:
 		dst = append(dst, "<strong>"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, c)
+			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 		dst = append(dst, "</strong>"...)
 	case CodeSpanKind:
 		dst = append(dst, "<code>"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, c)
+			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 		dst = append(dst, "</code>"...)
 	case LinkKind:
+		var def LinkDefinition
+		if ref := inline.LinkReference(); ref != "" {
+			def = refMap[ref]
+		} else {
+			title := inline.LinkTitle()
+			def = LinkDefinition{
+				Destination:  inline.LinkDestination().Text(source),
+				Title:        title.Text(source),
+				TitlePresent: title != nil,
+			}
+		}
 		dst = append(dst, `<a href="`...)
-		dst = append(dst, html.EscapeString(NormalizeURI(inline.LinkDestination().Text(source)))...)
+		dst = append(dst, html.EscapeString(NormalizeURI(def.Destination))...)
 		dst = append(dst, `"`...)
-		if title := inline.LinkTitle(); title != nil {
+		if def.TitlePresent {
 			dst = append(dst, ` title="`...)
-			dst = append(dst, html.EscapeString(title.Text(source))...)
+			dst = append(dst, html.EscapeString(def.Title)...)
 			dst = append(dst, `"`...)
 		}
 		dst = append(dst, ">"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, c)
+			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 		dst = append(dst, "</a>"...)
 	case IndentKind:

@@ -55,7 +55,7 @@ func NewBlockParser(r io.Reader) *BlockParser {
 // Parse parses an in-memory CommonMark document and returns its blocks.
 // As long as source does not contain NUL bytes,
 // the blocks will use the original byte slice as their source.
-func Parse(source []byte) []*RootBlock {
+func Parse(source []byte) ([]*RootBlock, ReferenceMap) {
 	if bytes.IndexByte(source, 0) >= 0 {
 		// Contains one or more NUL bytes.
 		// Replace with Unicode replacement character.
@@ -66,19 +66,23 @@ func Parse(source []byte) []*RootBlock {
 		err: io.EOF,
 	}
 	var blocks []*RootBlock
+	refMap := make(ReferenceMap)
 	for {
 		block, err := p.NextBlock()
 		if err == io.EOF {
-			inlineParser := new(InlineParser)
+			inlineParser := &InlineParser{
+				ReferenceMatcher: refMap,
+			}
 			for _, block := range blocks {
 				inlineParser.Rewrite(block)
 			}
-			return blocks
+			return blocks, refMap
 		}
 		if err != nil {
 			panic(err)
 		}
 		blocks = append(blocks, block)
+		refMap.Extract(block.Source, block.AsNode())
 	}
 }
 
