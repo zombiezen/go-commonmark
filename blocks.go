@@ -574,7 +574,7 @@ var blockStarts = []func(*lineParser){
 		if indent >= codeBlockIndentLimit {
 			return
 		}
-		if !bytes.HasPrefix(p.BytesAfterIndent(), []byte(blockQuotePrefix)) {
+		if !hasBytePrefix(p.BytesAfterIndent(), blockQuotePrefix) {
 			return
 		}
 
@@ -774,7 +774,7 @@ var blocks = map[BlockKind]blockRule{
 			if indent >= codeBlockIndentLimit {
 				return false
 			}
-			if !bytes.HasPrefix(p.BytesAfterIndent(), []byte(blockQuotePrefix)) {
+			if !hasBytePrefix(p.BytesAfterIndent(), blockQuotePrefix) {
 				return false
 			}
 			p.ConsumeIndent(indent)
@@ -1103,11 +1103,10 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 			span: label.inner,
 			ref:  transformLinkReferenceSpan(source, originalBlock.inlineChildren, label.inner),
 		}
-		collectLinkAttributeText(
+		collectLinkLabelText(
 			labelInline,
 			newInlineByteReader(source, originalBlock.inlineChildren, label.inner.Start),
 			label.inner.End,
-			false,
 		)
 		newBlock.inlineChildren = append(newBlock.inlineChildren, labelInline)
 
@@ -1119,7 +1118,6 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 			destinationInline,
 			newInlineByteReader(source, originalBlock.inlineChildren, destination.text.Start),
 			destination.text.End,
-			true,
 		)
 		newBlock.inlineChildren = append(newBlock.inlineChildren, destinationInline)
 
@@ -1137,7 +1135,6 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 				titleInline,
 				newInlineByteReader(source, originalBlock.inlineChildren, title.text.Start),
 				title.text.End,
-				true,
 			)
 			newBlock.inlineChildren = append(newBlock.inlineChildren, titleInline)
 			*r = cloned

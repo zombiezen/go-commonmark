@@ -548,6 +548,10 @@ func isSpaceTabOrLineEnding(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
+func isASCIILetter(c byte) bool {
+	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z'
+}
+
 func isASCIIDigit(c byte) bool {
 	return '0' <= c && c <= '9'
 }
@@ -589,4 +593,16 @@ func isEndEscaped(s []byte) bool {
 		}
 	}
 	return n%2 == 1
+}
+
+func hasBytePrefix(b []byte, prefix string) bool {
+	if len(b) < len(prefix) {
+		return false
+	}
+	for i, bb := range b[:len(prefix)] {
+		if prefix[i] != bb {
+			return false
+		}
+	}
+	return true
 }

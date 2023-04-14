@@ -122,6 +122,8 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 	switch inline.Kind() {
 	case TextKind, UnparsedKind:
 		dst = append(dst, html.EscapeString(inline.Text(source))...)
+	case RawHTMLKind:
+		dst = append(dst, inline.Text(source)...)
 	case SoftLineBreakKind:
 		dst = append(dst, '\n')
 	case HardLineBreakKind:
@@ -173,6 +175,10 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			dst = append(dst, ' ')
 		}
+	case HTMLTagKind:
+		for _, c := range inline.children {
+			dst = appendInlineHTML(dst, source, refMap, c)
+		}
 	}
 	return dst
 }
@@ -203,7 +209,7 @@ func NormalizeURI(s string) string {
 			} else {
 				sb.WriteString("%25")
 			}
-		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.ContainsRune(safeSet, c):
+		case (c < 0x80 && (isASCIILetter(byte(c)) || isASCIIDigit(byte(c)))) || strings.ContainsRune(safeSet, c):
 			sb.WriteRune(c)
 		default:
 			n := utf8.EncodeRune(buf[:], c)
@@ -217,8 +223,243 @@ func NormalizeURI(s string) string {
 	return sb.String()
 }
 
+func parseHTMLTag(r *inlineByteReader) Span {
+	const (
+		cdataPrefix = "[CDATA["
+		cdataSuffix = "]]>"
+	)
+
+	if r.current() != '<' {
+		return NullSpan()
+	}
+	result := Span{Start: r.pos, End: -1}
+	if !r.next() || r.jumped() {
+		return NullSpan()
+	}
+	switch r.current() {
+	case '?':
+		// Processing instructions.
+		if !r.next() {
+			return NullSpan()
+		}
+		for {
+			if r.current() != '?' {
+				if !r.next() {
+					return NullSpan()
+				}
+				continue
+			}
+			if !r.next() || r.jumped() {
+				return NullSpan()
+			}
+			if r.current() == '>' {
+				result.End = r.pos + 1
+				r.next()
+				return result
+			}
+		}
+	case '!':
+		// Declaration, comment, or CDATA.
+		if !r.next() || r.jumped() {
+			return NullSpan()
+		}
+		rest := r.remainingNodeBytes()
+		switch {
+		case len(rest) > 0 && isASCIILetter(rest[0]):
+			// Declaration.
+			r.next()
+			for r.current() != '>' {
+				if !r.next() {
+					return NullSpan()
+				}
+			}
+			result.End = r.pos + 1
+			r.next()
+			return result
+		case hasBytePrefix(rest, "--"):
+			// Comment.
+			r.next()
+			if !r.next() || r.jumped() {
+				return NullSpan()
+			}
+			if textStart := r.remainingNodeBytes(); hasBytePrefix(textStart, ">") || hasBytePrefix(textStart, "->") {
+				return NullSpan()
+			}
+			for {
+				if hasBytePrefix(r.remainingNodeBytes(), "-->") {
+					r.next()
+					r.next()
+					result.End = r.pos + 1
+					r.next()
+					return result
+				}
+				// Check for either "--" or "--->".
+				if hasBytePrefix(r.remainingNodeBytes(), "--") {
+					return NullSpan()
+				}
+				if !r.next() {
+					return NullSpan()
+				}
+			}
+		case hasBytePrefix(rest, cdataPrefix):
+			// CDATA.
+			for i := 0; i < len(cdataPrefix); i++ {
+				if !r.next() {
+					return NullSpan()
+				}
+			}
+			for {
+				if hasBytePrefix(r.remainingNodeBytes(), cdataSuffix) {
+					for i := 0; i < len(cdataSuffix)-1; i++ {
+						r.next()
+					}
+					result.End = r.pos + 1
+					r.next()
+					return result
+				}
+				if !r.next() {
+					return NullSpan()
+				}
+			}
+		default:
+			return NullSpan()
+		}
+	case '/':
+		// Closing tag.
+		if !r.next() || r.jumped() {
+			return NullSpan()
+		}
+		if !parseHTMLTagName(r) {
+			return NullSpan()
+		}
+		if !skipLinkSpace(r) {
+			return NullSpan()
+		}
+		if r.current() != '>' {
+			return NullSpan()
+		}
+		result.End = r.pos + 1
+		r.next()
+		return result
+	default:
+		// Open tag.
+		if !parseHTMLTagName(r) {
+			return NullSpan()
+		}
+		for {
+			beforeSpace := r.pos
+			if !skipLinkSpace(r) {
+				return NullSpan()
+			}
+			switch r.current() {
+			case '/':
+				if !r.next() || r.jumped() {
+					return NullSpan()
+				}
+				if r.current() != '>' {
+					return NullSpan()
+				}
+				fallthrough
+			case '>':
+				result.End = r.pos + 1
+				r.next()
+				return result
+			}
+			if r.pos == beforeSpace || !parseHTMLAttribute(r) {
+				return NullSpan()
+			}
+		}
+	}
+}
+
+func parseHTMLTagName(r *inlineByteReader) bool {
+	if !isASCIILetter(r.current()) {
+		return false
+	}
+	if !r.next() {
+		return true
+	}
+	for isASCIILetter(r.current()) || isASCIIDigit(r.current()) || r.current() == '-' {
+		if !r.next() {
+			return true
+		}
+	}
+	return true
+}
+
+func parseHTMLAttribute(r *inlineByteReader) bool {
+	// Attribute name.
+	if c := r.current(); !isASCIILetter(c) && c != '_' && c != ':' {
+		return false
+	}
+	if !r.next() {
+		// Only one character needed for name and value is optional.
+		return true
+	}
+	for isASCIILetter(r.current()) || isASCIIDigit(r.current()) || strings.IndexByte("_.:-", r.current()) >= 0 {
+		if !r.next() {
+			return true
+		}
+	}
+
+	// Attribute value specification.
+	// Don't consume space unless it is followed by an equal sign,
+	// since it will cause future attributes to fail.
+	prevState := *r
+	if !skipLinkSpace(r) {
+		*r = prevState
+		return true
+	}
+	if r.current() != '=' {
+		*r = prevState
+		return true
+	}
+	if !r.next() {
+		// Must have an attribute value following equals sign.
+		return false
+	}
+	if !skipLinkSpace(r) {
+		// Must have an attribute value following equals sign.
+		return false
+	}
+	switch c := r.current(); {
+	case c == '\'':
+		if !r.next() {
+			return false
+		}
+		for r.current() != '\'' {
+			if !r.next() {
+				return false
+			}
+		}
+		r.next()
+		return true
+	case c == '"':
+		if !r.next() {
+			return false
+		}
+		for r.current() != '"' {
+			if !r.next() {
+				return false
+			}
+		}
+		r.next()
+		return true
+	case isUnquotedAttributeValueChar(c):
+		for r.next() && isUnquotedAttributeValueChar(r.current()) {
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnquotedAttributeValueChar(c byte) bool {
+	return !isSpaceTabOrLineEnding(c) && strings.IndexByte("\"'=<>`", c) < 0
+}
+
 func isHex(c byte) bool {
-	return 'a' <= c && c <= 'f' || 'A' <= c && c <= 'f' || '0' <= c && c <= '9'
+	return 'a' <= c && c <= 'f' || 'A' <= c && c <= 'f' || isASCIIDigit(c)
 }
 
 func urlHexDigit(x byte) byte {

@@ -62,7 +62,7 @@ func (inline *Inline) IndentWidth() int {
 // Text converts a non-container inline node into a string.
 func (inline *Inline) Text(source []byte) string {
 	switch inline.Kind() {
-	case TextKind:
+	case TextKind, RawHTMLKind:
 		return string(spanSlice(source, inline.Span()))
 	case SoftLineBreakKind, HardLineBreakKind:
 		return "\n"
@@ -197,6 +197,12 @@ const (
 
 	CodeSpanKind
 	AutolinkKind
+
+	// HTMLTagKind is a container for one or more [RawHTMLKind] nodes
+	// that represents an open tag, a closing tag, an HTML comment,
+	// a processing instruction, a declaration, or a CDATA section.
+	HTMLTagKind
+	// RawHTMLKind is a text node that should be reproduced in HTML verbatim.
 	RawHTMLKind
 
 	// UnparsedKind is used for inline text that has not been tokenized.
@@ -358,6 +364,36 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 						// Advance past literal backtick string.
 						pos = cs.content.Start
 					}
+				case '<':
+					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], pos)
+					span := parseHTMLTag(r)
+					if !span.IsValid() {
+						// TODO(soon): Autolinks.
+						pos++
+						continue
+					}
+					state.addToRoot(&Inline{
+						kind: TextKind,
+						span: Span{
+							Start: plainStart,
+							End:   span.Start,
+						},
+					})
+					newNode := &Inline{
+						kind: HTMLTagKind,
+						span: span,
+					}
+					r = newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], span.Start)
+					collectRawHTML(newNode, r, span.End)
+					state.addToRoot(newNode)
+
+					pos = span.End
+					plainStart = pos
+					if i := nodeIndexForPosition(state.unparsed[state.unparsedPos:], pos); i >= 0 {
+						state.unparsedPos += i
+					} else {
+						state.unparsedPos = len(state.unparsed)
+					}
 				case '\\':
 					state.addToRoot(&Inline{
 						kind: TextKind,
@@ -488,7 +524,7 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 				}
 				if info.destination.text.IsValid() {
 					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], info.destination.text.Start)
-					collectLinkAttributeText(destNode, r, info.destination.text.End, true)
+					collectLinkAttributeText(destNode, r, info.destination.text.End)
 				}
 				linkNode.children = append(linkNode.children, destNode)
 			}
@@ -499,7 +535,7 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 				}
 				if info.title.text.IsValid() {
 					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], info.title.text.Start)
-					collectLinkAttributeText(destNode, r, info.title.text.End, true)
+					collectLinkAttributeText(destNode, r, info.title.text.End)
 				}
 				linkNode.children = append(linkNode.children, destNode)
 			}
@@ -552,11 +588,10 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 			kind: LinkLabelKind,
 			span: label.span,
 		}
-		collectLinkAttributeText(
+		collectLinkLabelText(
 			inlineLabel,
 			newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], label.inner.Start),
 			label.inner.End,
-			false,
 		)
 		inlineLabel.ref = transformLinkReference(state.source, inlineLabel.children)
 		if p.ReferenceMatcher == nil || !p.ReferenceMatcher.MatchReference(inlineLabel.ref) {
@@ -877,6 +912,8 @@ func parseLinkLabel(r *inlineByteReader) linkLabel {
 	return result
 }
 
+// skipLinkSpace skips over "spaces, tabs, and up to one line ending"
+// (a frequent phrase in the CommonMark specification).
 func skipLinkSpace(r *inlineByteReader) bool {
 	// Even though the [inline link] spec says to only permit "up to one line ending",
 	// this case is already handled for us by block parsing.
@@ -891,7 +928,19 @@ func skipLinkSpace(r *inlineByteReader) bool {
 	return true
 }
 
-func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int, escapes bool) {
+func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int) {
+	collectTextNodes(parent, r, end, TextKind, true)
+}
+
+func collectLinkLabelText(parent *Inline, r *inlineByteReader, end int) {
+	collectTextNodes(parent, r, end, TextKind, false)
+}
+
+func collectRawHTML(parent *Inline, r *inlineByteReader, end int) {
+	collectTextNodes(parent, r, end, RawHTMLKind, false)
+}
+
+func collectTextNodes(parent *Inline, r *inlineByteReader, end int, textKind InlineKind, escapes bool) {
 	plainStart := r.pos
 	for r.pos < end {
 		curr := r.currentNode()
@@ -900,7 +949,7 @@ func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int, esca
 			// Copy it over verbatim and skip it.
 			if r.pos > plainStart {
 				parent.children = append(parent.children, &Inline{
-					kind: TextKind,
+					kind: textKind,
 					span: Span{
 						Start: plainStart,
 						End:   r.prevPos + 1,
@@ -918,7 +967,7 @@ func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int, esca
 			if r.next() && r.pos < end && isASCIIPunctuation(r.current()) {
 				if r.prevPos > plainStart {
 					parent.children = append(parent.children, &Inline{
-						kind: TextKind,
+						kind: textKind,
 						span: Span{
 							Start: plainStart,
 							End:   r.prevPos, // exclude backslash
@@ -935,7 +984,7 @@ func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int, esca
 		if r.jumped() {
 			if r.prevPos > plainStart {
 				parent.children = append(parent.children, &Inline{
-					kind: TextKind,
+					kind: textKind,
 					span: Span{
 						Start: plainStart,
 						End:   r.prevPos + 1,
@@ -948,7 +997,7 @@ func collectLinkAttributeText(parent *Inline, r *inlineByteReader, end int, esca
 
 	if plainStart < end {
 		parent.children = append(parent.children, &Inline{
-			kind: TextKind,
+			kind: textKind,
 			span: Span{
 				Start: plainStart,
 				End:   end,
@@ -1522,6 +1571,14 @@ func (r *inlineByteReader) currentNode() *Inline {
 	}
 	r.spans = r.spans[spanIndex:]
 	return r.spans[0]
+}
+
+func (r *inlineByteReader) remainingNodeBytes() []byte {
+	node := r.currentNode()
+	if node == nil {
+		return nil
+	}
+	return r.source[r.pos:node.Span().End]
 }
 
 func (r *inlineByteReader) next() bool {
