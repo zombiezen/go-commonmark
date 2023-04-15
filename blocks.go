@@ -1117,6 +1117,8 @@ func (m listMarker) isOrdered() bool {
 	return m.delim == '.' || m.delim == ')'
 }
 
+// onCloseParagraph handles the closing of a paragraph block
+// by searching its beginning for link reference definitions.
 func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 	if len(originalBlock.inlineChildren) == 0 {
 		return []*Block{originalBlock}
@@ -1126,27 +1128,40 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 	r := newInlineByteReader(source, originalBlock.inlineChildren, contentStart)
 	var result []*Block
 	for {
+		// At a minimum, a link reference definition must have a label and a destination.
 		label := parseLinkLabel(r)
 		if !label.span.IsValid() {
-			break
+			return append(result, originalBlock)
 		}
 		if r.current() != ':' {
-			break
+			return append(result, originalBlock)
 		}
 		r.next()
 		if !skipLinkSpace(r) {
-			break
+			return append(result, originalBlock)
 		}
 		destination := parseLinkDestination(r)
 		if !destination.span.IsValid() {
-			break
+			return append(result, originalBlock)
 		}
 
+		// Check if we're at the end of the line.
+		// The title may be on the next line,
+		// but if it isn't, then we may need to back up.
+		sepPoint := r.pos
+		destinationEOL := readEOL(r)
+		cloned := *r
+		if destinationEOL < 0 && r.pos == sepPoint && r.current() != 0 {
+			// Title must be separated by at least one space.
+			// Abandon this definition.
+			return append(result, originalBlock)
+		}
+
+		// We likely have a new link reference definition, so prep it.
 		newBlock := &Block{
 			kind: LinkReferenceDefinitionKind,
 			span: Span{Start: label.span.Start, End: destination.span.End},
 		}
-		result = append(result, newBlock)
 
 		labelInline := &Inline{
 			kind: LinkLabelKind,
@@ -1171,42 +1186,121 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 		)
 		newBlock.inlineChildren = append(newBlock.inlineChildren, destinationInline)
 
+		// Consume whitespace before the title (only if we moved to a subsequent line).
 		if !skipLinkSpace(r) {
-			newBlock.span.End = originalBlock.span.End
+			// We hit EOF before encountering anything else.
+			newBlock.span.End = destinationEOL
+			return append(result, newBlock)
+		}
+
+		// Parse title, if present.
+		title := parseLinkTitle(r)
+		if !title.span.IsValid() {
+			if destinationEOL < 0 {
+				// There were non-space characters after the destination and it wasn't a title:
+				// abandon this definition.
+				return append(result, originalBlock)
+			}
+
+			// We have a complete link reference definition,
+			// we just need to rewind to the beginning of the line.
+			newBlock.span.End = destinationEOL
+			result = append(result, newBlock)
+
+			originalBlock.span.Start = cloned.pos
+			firstChild := nodeIndexForPosition(originalBlock.inlineChildren, cloned.pos)
+			if firstChild < 0 {
+				return result
+			}
+			originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
+			*r = cloned
+			continue
+		}
+
+		// We have a title. Now ensure there are no more characters on the line.
+		titleEOL := readEOL(r)
+		if titleEOL < 0 {
+			// No dice. If the title wasn't cleanly on another line,
+			// then we don't have a definition.
+			if destinationEOL < 0 {
+				return append(result, originalBlock)
+			}
+
+			// We have a valid link reference definition without a title.
+			// Any line that starts with a valid title
+			// can't possibly be another link reference definition
+			// (titles can't start with a '['),
+			// so we know we're done.
+			newBlock.span.End = destinationEOL
+			result = append(result, newBlock)
+
+			originalBlock.span.Start = cloned.pos
+			firstChild := nodeIndexForPosition(originalBlock.inlineChildren, cloned.pos)
+			if firstChild < 0 {
+				return result
+			}
+			originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
+			return append(result, originalBlock)
+		}
+
+		// We now have a link reference definition with all three parts:
+		// label, destination, and title.
+		// Collect it up, shorten the block, and loop through again.
+		titleInline := &Inline{
+			kind: LinkTitleKind,
+			span: title.span,
+		}
+		collectLinkAttributeText(
+			titleInline,
+			newInlineByteReader(source, originalBlock.inlineChildren, title.text.Start),
+			title.text.End,
+		)
+		newBlock.inlineChildren = append(newBlock.inlineChildren, titleInline)
+		newBlock.span.End = titleEOL
+		result = append(result, newBlock)
+
+		originalBlock.span.Start = r.pos
+		firstChild := nodeIndexForPosition(originalBlock.inlineChildren, r.pos)
+		if firstChild < 0 {
 			return result
 		}
-		cloned := *r
-		if title := parseLinkTitle(&cloned); title.span.IsValid() {
-			titleInline := &Inline{
-				kind: LinkTitleKind,
-				span: destination.span,
-			}
-			collectLinkAttributeText(
-				titleInline,
-				newInlineByteReader(source, originalBlock.inlineChildren, title.text.Start),
-				title.text.End,
-			)
-			newBlock.inlineChildren = append(newBlock.inlineChildren, titleInline)
-			*r = cloned
-			newBlock.span.End = title.span.End
-		}
-
-		// Extend block span to end of line.
-		finalLineIndex := nodeIndexForPosition(originalBlock.inlineChildren, newBlock.span.End-1)
-		newBlock.span.End = originalBlock.inlineChildren[finalLineIndex].Span().End
-		if finalLineIndex+1 < len(originalBlock.inlineChildren) {
-			// TODO(maybe): What if this isn't an unparsed?
-			contentStart = originalBlock.inlineChildren[finalLineIndex+1].Span().Start
-		} else {
-			contentStart = originalBlock.Span().End
-		}
-	}
-
-	if contentStart < originalBlock.Span().End {
-		firstChild := nodeIndexForPosition(originalBlock.inlineChildren, contentStart)
-		originalBlock.span.Start = contentStart
 		originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
-		result = append(result, originalBlock)
 	}
-	return result
+}
+
+// skipLinkSpace skips over spaces and tabs
+// and returns whether it stopped before EOF.
+func skipSpacesAndTabs(r *inlineByteReader) bool {
+	for r.current() == ' ' || r.current() == '\t' {
+		if !r.next() {
+			return false
+		}
+	}
+	return true
+}
+
+// readEOL skips over any trailing spaces
+// and then attempts to consume a single line ending or EOF,
+// returning the position of the line end (exclusive).
+// If unsuccessful, readEOL will have consumed the whitespace
+// and returns -1.
+func readEOL(r *inlineByteReader) (end int) {
+	if !skipSpacesAndTabs(r) {
+		return r.pos
+	}
+	switch r.current() {
+	case '\r':
+		if !r.next() {
+			return r.prevPos + 1
+		}
+		if r.current() == '\n' {
+			r.next()
+		}
+		return r.prevPos + 1
+	case '\n':
+		r.next()
+		return r.prevPos + 1
+	default:
+		return -1
+	}
 }

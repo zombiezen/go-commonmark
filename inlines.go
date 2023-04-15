@@ -921,6 +921,9 @@ func skipLinkSpace(r *inlineByteReader) bool {
 	//
 	// [inline link]: https://spec.commonmark.org/0.30/#inline-link
 
+	if r.current() == 0 {
+		return false
+	}
 	for isSpaceTabOrLineEnding(r.current()) {
 		if !r.next() {
 			return false
