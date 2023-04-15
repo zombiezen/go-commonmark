@@ -60,13 +60,10 @@ var supportedSections = map[string]struct{}{
 
 var skippedExamples = map[int]string{
 	20:  "autolinks not implemented",
-	21:  "HTML block not implemented",
 	59:  "setext headings not implemented",
 	115: "setext headings not implemented",
 	141: "setext headings not implemented",
 	300: "setext headings not implemented",
-	308: "HTML block not implemented",
-	309: "HTML block not implemented",
 	346: "autolinks not implemented",
 	479: "autolinks not implemented",
 	480: "autolinks not implemented",
