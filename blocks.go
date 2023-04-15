@@ -53,6 +53,8 @@ type Block struct {
 	// n is a kind-specific datum.
 	// For [ATXHeadingKind] and [SetextHeadingKind], it is the level of the heading.
 	// For [FencedCodeBlockKind], it is the number of characters used in the starting code fence.
+	// For [HTMLBlockKind], it is the index in [htmlBlockConditions]
+	// that started this block.
 	n int
 
 	// char is a kind-specific datum.
@@ -236,11 +238,7 @@ type lineParser struct {
 	col          int  // 0-based column position within line
 	tabRemaining int8 // number of columns left within current tab character
 
-	state               int8
-	listItemHasChildren bool // whether the current list item has children beyond the marker
-	fenceChar           byte
-	fenceCharCount      int
-	currentIndent       int // indentation of current list item being true
+	state int8
 }
 
 // Line parser states.
@@ -283,27 +281,8 @@ func (p *lineParser) reset(lineStart int, newSource []byte) {
 	p.line = newSource[lineStart:]
 	p.i = 0
 	p.col = 0
+	p.container = &p.root
 	p.updateTabRemaining()
-	p.clearMatchData()
-}
-
-func (p *lineParser) setupMatch(child *Block) {
-	p.state = stateDescending
-	p.currentIndent = child.indent
-	switch child.Kind() {
-	case ListItemKind:
-		p.listItemHasChildren = child.ChildCount() > 1
-	case FencedCodeBlockKind:
-		p.fenceChar = child.char
-		p.fenceCharCount = child.n
-	}
-}
-
-func (p *lineParser) clearMatchData() {
-	p.currentIndent = math.MaxInt
-	p.listItemHasChildren = false
-	p.fenceChar = 0
-	p.fenceCharCount = 0
 }
 
 // BytesAfterIndent returns the bytes
@@ -410,9 +389,7 @@ func (p *lineParser) ConsumeIndent(n int) {
 	}
 }
 
-// ContainerKind returns the kind of the current block.
-// During block start checks, this will be the parent of block being considered.
-// During [blockRule] matches, this will be the same as the rule's kind.
+// ContainerKind returns the kind of the container block.
 func (p *lineParser) ContainerKind() BlockKind {
 	return p.container.kind
 }
@@ -429,25 +406,38 @@ func (p *lineParser) ContainerListDelim() byte {
 	return p.container.char
 }
 
-// CurrentBlockIndent returns the indent value assigned to the current block.
+// ContainerIndent returns the indent value assigned to the current block.
 // Only valid while matching continuation lines.
-func (p *lineParser) CurrentBlockIndent() int {
-	return p.currentIndent
+func (p *lineParser) ContainerIndent() int {
+	if p.state != stateDescending && p.state != stateDescendTerminated {
+		return math.MaxInt
+	}
+	return p.container.indent
 }
 
-func (p *lineParser) CurrentItemHasChildren() bool {
-	return p.listItemHasChildren
+func (p *lineParser) ListItemContainerHasChildren() bool {
+	return p.ContainerKind() == ListItemKind && p.container.ChildCount() > 1
 }
 
-// CurrentCodeFence returns the character and number of characters
+// ContainerCodeFence returns the character and number of characters
 // used to start the code fence being currently matched.
-func (p *lineParser) CurrentCodeFence() (c byte, n int) {
-	return p.fenceChar, p.fenceCharCount
+func (p *lineParser) ContainerCodeFence() (c byte, n int) {
+	if p.ContainerKind() != FencedCodeBlockKind {
+		return 0, 0
+	}
+	return p.container.char, p.container.n
+}
+
+func (p *lineParser) ContainerHTMLCondition() int {
+	if p.ContainerKind() != HTMLBlockKind {
+		return -1
+	}
+	return p.container.n
 }
 
 // OpenBlock starts a new block at the current position.
 func (p *lineParser) OpenBlock(kind BlockKind) {
-	if kind == ListKind || kind == ListItemKind || kind == FencedCodeBlockKind || kind.IsHeading() {
+	if kind == ListKind || kind == ListItemKind || kind == FencedCodeBlockKind || kind == HTMLBlockKind || kind.IsHeading() {
 		panic("OpenBlock cannot be called with this kind")
 	}
 	p.openBlock(kind)
@@ -473,6 +463,11 @@ func (p *lineParser) OpenHeadingBlock(kind BlockKind, level int) {
 	}
 	p.openBlock(kind)
 	p.container.n = level
+}
+
+func (p *lineParser) OpenHTMLBlock(conditionIndex int) {
+	p.openBlock(HTMLBlockKind)
+	p.container.n = conditionIndex
 }
 
 func (p *lineParser) openBlock(kind BlockKind) {
@@ -520,15 +515,31 @@ func (p *lineParser) SetContainerIndent(indent int) {
 	p.container.indent = indent
 }
 
-// CollectInline adds a new [UnparsedKind] inline to the current block,
+// CollectInline adds a new [UnparsedKind] inline to the container,
 // starting at the current position and ending after n bytes.
+// If the current position is at the indent,
+// the indent is included -- the n bytes do not count the indent.
 func (p *lineParser) CollectInline(kind InlineKind, n int) {
 	switch p.state {
-	case stateDescending, stateDescendTerminated:
+	case stateDescendTerminated:
 		panic("CollectInline cannot be called in this context")
 	case stateOpening:
 		p.state = stateOpenMatched
 	}
+
+	if indent := p.Indent(); indent > 0 {
+		indentStart := p.lineStart + p.i
+		p.Advance(indentLength(p.line[p.i:]))
+		p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
+			kind: IndentKind,
+			span: Span{
+				Start: indentStart,
+				End:   p.lineStart + p.i,
+			},
+			indent: indent,
+		})
+	}
+
 	start := p.lineStart + p.i
 	p.Advance(n)
 	if kind == InfoStringKind {
@@ -624,6 +635,32 @@ var blockStarts = []func(*lineParser){
 			p.CollectInline(InfoStringKind, f.info.Len())
 		}
 		p.ConsumeLine()
+	},
+
+	// HTML block.
+	func(p *lineParser) {
+		indent := p.Indent()
+		if indent >= codeBlockIndentLimit {
+			return
+		}
+		line := p.BytesAfterIndent()
+		if len(line) == 0 || line[0] != '<' {
+			return
+		}
+		for i, conds := range htmlBlockConditions {
+			if conds.startCondition(line) {
+				if !conds.canInterruptParagraph && p.ContainerKind() == ParagraphKind {
+					return
+				}
+				p.OpenHTMLBlock(i)
+				if conds.endCondition(line) {
+					p.CollectInline(RawHTMLKind, len(p.BytesAfterIndent()))
+					p.ConsumeLine()
+					p.EndBlock()
+				}
+				return
+			}
+		}
 	},
 
 	// Thematic break.
@@ -753,14 +790,14 @@ var blocks = map[BlockKind]blockRule{
 		match: func(p *lineParser) bool {
 			switch {
 			case p.IsRestBlank():
-				if !p.CurrentItemHasChildren() {
+				if !p.ListItemContainerHasChildren() {
 					// A list item can begin with at most one blank line.
 					return false
 				}
 				p.ConsumeIndent(p.Indent())
 				return true
-			case p.Indent() >= p.CurrentBlockIndent():
-				p.ConsumeIndent(p.CurrentBlockIndent())
+			case p.Indent() >= p.ContainerIndent():
+				p.ConsumeIndent(p.ContainerIndent())
 				return true
 			default:
 				return false
@@ -790,7 +827,7 @@ var blocks = map[BlockKind]blockRule{
 		match: func(p *lineParser) bool {
 			lineIndent := p.Indent()
 			if lineIndent < codeBlockIndentLimit {
-				startChar, startCharCount := p.CurrentCodeFence()
+				startChar, startCharCount := p.ContainerCodeFence()
 				f := parseCodeFence(p.BytesAfterIndent())
 				if f.n > 0 && !f.info.IsValid() && f.char == startChar && f.n >= startCharCount {
 					// Closing fence.
@@ -798,7 +835,7 @@ var blocks = map[BlockKind]blockRule{
 					return false
 				}
 			}
-			if blockIndent := p.CurrentBlockIndent(); lineIndent < blockIndent {
+			if blockIndent := p.ContainerIndent(); lineIndent < blockIndent {
 				p.ConsumeIndent(lineIndent)
 			} else {
 				p.ConsumeIndent(blockIndent)
@@ -835,6 +872,19 @@ var blocks = map[BlockKind]blockRule{
 		acceptsLines: true,
 	},
 	ATXHeadingKind: {
+		acceptsLines: true,
+	},
+	HTMLBlockKind: {
+		match: func(p *lineParser) bool {
+			if htmlBlockConditions[p.ContainerHTMLCondition()].endCondition(p.BytesAfterIndent()) {
+				if !p.IsRestBlank() {
+					p.CollectInline(RawHTMLKind, len(p.BytesAfterIndent()))
+				}
+				p.ConsumeLine()
+				return false
+			}
+			return true
+		},
 		acceptsLines: true,
 	},
 	ParagraphKind: {

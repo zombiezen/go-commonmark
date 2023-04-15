@@ -96,6 +96,8 @@ func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []
 		dst = append(dst, "<li>"...)
 		dst = appendChildrenHTML(dst, source, refMap, block, block.IsTightList())
 		dst = append(dst, "</li>"...)
+	case HTMLBlockKind:
+		dst = appendChildrenHTML(dst, source, refMap, block, false)
 	}
 	return dst
 }
@@ -325,51 +327,74 @@ func parseHTMLTag(r *inlineByteReader) Span {
 			return NullSpan()
 		}
 	case '/':
-		// Closing tag.
-		if !r.next() || r.jumped() {
+		result.End = parseHTMLClosingTag(r)
+		if result.End < 0 {
 			return NullSpan()
 		}
-		if !parseHTMLTagName(r) {
-			return NullSpan()
-		}
-		if !skipLinkSpace(r) {
-			return NullSpan()
-		}
-		if r.current() != '>' {
-			return NullSpan()
-		}
-		result.End = r.pos + 1
-		r.next()
 		return result
 	default:
-		// Open tag.
-		if !parseHTMLTagName(r) {
+		result.End = parseHTMLOpenTag(r)
+		if result.End < 0 {
 			return NullSpan()
 		}
-		for {
-			beforeSpace := r.pos
-			if !skipLinkSpace(r) {
-				return NullSpan()
+		return result
+	}
+}
+
+// parseHTMLOpenTag parses an [open tag] sans the leading '<'.
+//
+// [open tag]: https://spec.commonmark.org/0.30/#open-tag
+func parseHTMLOpenTag(r *inlineByteReader) (end int) {
+	if !parseHTMLTagName(r) {
+		return -1
+	}
+	for {
+		beforeSpace := r.pos
+		if !skipLinkSpace(r) {
+			return -1
+		}
+		switch r.current() {
+		case '/':
+			if !r.next() || r.jumped() {
+				return -1
 			}
-			switch r.current() {
-			case '/':
-				if !r.next() || r.jumped() {
-					return NullSpan()
-				}
-				if r.current() != '>' {
-					return NullSpan()
-				}
-				fallthrough
-			case '>':
-				result.End = r.pos + 1
-				r.next()
-				return result
+			if r.current() != '>' {
+				return -1
 			}
-			if r.pos == beforeSpace || !parseHTMLAttribute(r) {
-				return NullSpan()
-			}
+			fallthrough
+		case '>':
+			end = r.pos + 1
+			r.next()
+			return end
+		}
+		if r.pos == beforeSpace || !parseHTMLAttribute(r) {
+			return -1
 		}
 	}
+}
+
+// parseHTMLClosingTag parses an [open tag] sans the leading '<'.
+//
+// [closing tag]: https://spec.commonmark.org/0.30/#closing-tag
+func parseHTMLClosingTag(r *inlineByteReader) (end int) {
+	if r.current() != '/' {
+		return -1
+	}
+	if !r.next() || r.jumped() {
+		return -1
+	}
+	if !parseHTMLTagName(r) {
+		return -1
+	}
+	if !skipLinkSpace(r) {
+		return -1
+	}
+	if r.current() != '>' {
+		return -1
+	}
+	end = r.pos + 1
+	r.next()
+	return end
 }
 
 func parseHTMLTagName(r *inlineByteReader) bool {
@@ -454,6 +479,150 @@ func parseHTMLAttribute(r *inlineByteReader) bool {
 	}
 }
 
+// htmlBlockConditions is the set of [HTML block] start and end conditions.
+//
+// [HTML block]: https://spec.commonmark.org/0.30/#html-blocks
+var htmlBlockConditions = []struct {
+	startCondition        func(line []byte) bool
+	endCondition          func(line []byte) bool
+	canInterruptParagraph bool
+}{
+	{
+		startCondition: func(line []byte) bool {
+			for _, starter := range htmlBlockStarters1 {
+				if hasCaseInsensitiveBytePrefix(line, starter) {
+					rest := line[len(starter):]
+					if len(rest) == 0 || isSpaceTabOrLineEnding(rest[0]) || rest[0] == '>' {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		endCondition: func(line []byte) bool {
+			for _, ender := range htmlBlockEnders1 {
+				if caseInsensitiveContains(line, ender) {
+					return true
+				}
+			}
+			return false
+		},
+		canInterruptParagraph: true,
+	},
+	{
+		startCondition: func(line []byte) bool {
+			return hasBytePrefix(line, "<!--")
+		},
+		endCondition: func(line []byte) bool {
+			return contains(line, "-->")
+		},
+		canInterruptParagraph: true,
+	},
+	{
+		startCondition: func(line []byte) bool {
+			return hasBytePrefix(line, "<?")
+		},
+		endCondition: func(line []byte) bool {
+			return contains(line, "?>")
+		},
+		canInterruptParagraph: true,
+	},
+	{
+		startCondition: func(line []byte) bool {
+			return hasBytePrefix(line, "<!") && len(line) >= 3 && isASCIILetter(line[2])
+		},
+		endCondition: func(line []byte) bool {
+			return contains(line, ">")
+		},
+		canInterruptParagraph: true,
+	},
+	{
+		startCondition: func(line []byte) bool {
+			return hasBytePrefix(line, "<![CDATA[")
+		},
+		endCondition: func(line []byte) bool {
+			return contains(line, "]]>")
+		},
+		canInterruptParagraph: true,
+	},
+	{
+		startCondition: func(line []byte) bool {
+			switch {
+			case hasBytePrefix(line, "</"):
+				line = line[2:]
+			case hasBytePrefix(line, "<"):
+				line = line[1:]
+			default:
+				return false
+			}
+			for _, starter := range htmlBlockStarters6 {
+				if hasCaseInsensitiveBytePrefix(line, starter) {
+					rest := line[len(starter):]
+					if len(rest) == 0 || isSpaceTabOrLineEnding(rest[0]) || rest[0] == '>' || hasBytePrefix(rest, "/>") {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		endCondition:          isBlankLine,
+		canInterruptParagraph: true,
+	},
+	{
+		startCondition: func(line []byte) bool {
+			if !hasBytePrefix(line, "<") {
+				return false
+			}
+			fakeInline := &Inline{
+				kind: UnparsedKind,
+				span: Span{Start: 1, End: len(line)},
+			}
+			nodes := []*Inline{fakeInline}
+			r := newInlineByteReader(line, nodes, 1)
+			if hasBytePrefix(line, "</") {
+				if parseHTMLClosingTag(r) < 0 {
+					return false
+				}
+			} else {
+				if parseHTMLOpenTag(r) < 0 {
+					return false
+				}
+			}
+			return !skipLinkSpace(r)
+		},
+		endCondition:          isBlankLine,
+		canInterruptParagraph: false,
+	},
+}
+
+func hasCaseInsensitiveBytePrefix(b []byte, prefix string) bool {
+	if len(b) < len(prefix) {
+		return false
+	}
+	for i, bb := range b[:len(prefix)] {
+		if toLowerASCII(prefix[i]) != toLowerASCII(bb) {
+			return false
+		}
+	}
+	return true
+}
+
+func caseInsensitiveContains(b []byte, search string) bool {
+	for i := 0; i < len(b)-len(search); i++ {
+		if hasCaseInsensitiveBytePrefix(b[i:], search) {
+			return true
+		}
+	}
+	return false
+}
+
+func toLowerASCII(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c - 'A' + 'a'
+	}
+	return c
+}
+
 func isUnquotedAttributeValueChar(c byte) bool {
 	return !isSpaceTabOrLineEnding(c) && strings.IndexByte("\"'=<>`", c) < 0
 }
@@ -472,3 +641,83 @@ func urlHexDigit(x byte) byte {
 		panic("out of bounds")
 	}
 }
+
+var (
+	htmlBlockStarters1 = []string{
+		"<pre",
+		"<script",
+		"<style",
+		"<textarea",
+	}
+	htmlBlockEnders1 = []string{
+		"</pre>",
+		"</script>",
+		"</style>",
+		"</textarea>",
+	}
+
+	htmlBlockStarters6 = []string{
+		"address",
+		"article",
+		"aside",
+		"base",
+		"basefont",
+		"blockquote",
+		"body",
+		"caption",
+		"center",
+		"col",
+		"colgroup",
+		"dd",
+		"details",
+		"dialog",
+		"dir",
+		"div",
+		"dl",
+		"dt",
+		"fieldset",
+		"figcaption",
+		"figure",
+		"footer",
+		"form",
+		"frame",
+		"frameset",
+		"h1",
+		"h2",
+		"h3",
+		"h4",
+		"h5",
+		"h6",
+		"head",
+		"header",
+		"hr",
+		"html",
+		"iframe",
+		"legend",
+		"li",
+		"link",
+		"main",
+		"menu",
+		"menuitem",
+		"nav",
+		"noframes",
+		"ol",
+		"optgroup",
+		"option",
+		"p",
+		"param",
+		"section",
+		"source",
+		"summary",
+		"table",
+		"tbody",
+		"td",
+		"tfoot",
+		"th",
+		"thead",
+		"title",
+		"tr",
+		"track",
+		"ul",
+	}
+)

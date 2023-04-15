@@ -42,6 +42,7 @@ var supportedSections = map[string]struct{}{
 	"ATX headings":                 {},
 	"Indented code blocks":         {},
 	"Fenced code blocks":           {},
+	"HTML blocks":                  {},
 	"Paragraphs":                   {},
 	"Blank lines":                  {},
 	"Block quotes":                 {},

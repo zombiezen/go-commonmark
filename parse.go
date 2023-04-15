@@ -183,30 +183,31 @@ func (p *BlockParser) makeRoot(docChildren []*Block) *RootBlock {
 //
 // [Phase 1]: https://spec.commonmark.org/0.30/#phase-1-block-structure
 func descendOpenBlocks(p *lineParser) (allMatched bool) {
-	p.container = &p.root
-	child := p.root.lastChild().Block()
-	for {
-		rule := blocks[child.Kind()]
+	parent := &p.root
+	p.container = parent.lastChild().Block()
+	for p.container.isOpen() {
+		rule := blocks[p.ContainerKind()]
 		if rule.match == nil {
+			p.container = parent
 			return false
 		}
-		p.setupMatch(child)
+		p.state = stateDescending
 		ok := rule.match(p)
-		p.clearMatchData()
 		if p.state == stateDescendTerminated {
-			child.close(p.source, p.container, p.lineStart+p.i)
+			p.container.close(p.source, parent, p.lineStart+p.i)
+			p.container = parent
 			return true
 		}
 		if !ok {
+			p.container = parent
 			return false
 		}
 
-		p.container = child
-		child = child.lastChild().Block()
-		if !child.isOpen() {
-			return true
-		}
+		parent = p.container
+		p.container = parent.lastChild().Block()
 	}
+	p.container = parent
+	return true
 }
 
 // openNewBlocks looks for new block starts,
@@ -303,8 +304,11 @@ func addLineText(p *lineParser) {
 	}
 
 	inlineKind := UnparsedKind
-	if p.ContainerKind().IsCode() {
+	switch {
+	case p.ContainerKind().IsCode():
 		inlineKind = TextKind
+	case p.ContainerKind() == HTMLBlockKind:
+		inlineKind = RawHTMLKind
 	}
 	p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 		kind: inlineKind,
@@ -466,6 +470,8 @@ func columnWidth(start int, b []byte) int {
 	return end - start
 }
 
+// indentLength returns the number of space or tab bytes
+// at the beginning of the slice.
 func indentLength(line []byte) int {
 	for i, b := range line {
 		if b != ' ' && b != '\t' {
@@ -605,4 +611,13 @@ func hasBytePrefix(b []byte, prefix string) bool {
 		}
 	}
 	return true
+}
+
+func contains(b []byte, search string) bool {
+	for i := 0; i < len(b)-len(search); i++ {
+		if hasBytePrefix(b[i:], search) {
+			return true
+		}
+	}
+	return false
 }

@@ -913,7 +913,8 @@ func parseLinkLabel(r *inlineByteReader) linkLabel {
 }
 
 // skipLinkSpace skips over "spaces, tabs, and up to one line ending"
-// (a frequent phrase in the CommonMark specification).
+// (a frequent phrase in the CommonMark specification)
+// and returns whether it stopped before EOF.
 func skipLinkSpace(r *inlineByteReader) bool {
 	// Even though the [inline link] spec says to only permit "up to one line ending",
 	// this case is already handled for us by block parsing.
