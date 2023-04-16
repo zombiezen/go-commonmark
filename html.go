@@ -173,6 +173,28 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 		dst = append(dst, "</a>"...)
+	case ImageKind:
+		var def LinkDefinition
+		if ref := inline.LinkReference(); ref != "" {
+			def = refMap[ref]
+		} else {
+			title := inline.LinkTitle()
+			def = LinkDefinition{
+				Destination:  inline.LinkDestination().Text(source),
+				Title:        title.Text(source),
+				TitlePresent: title != nil,
+			}
+		}
+		dst = append(dst, `<img src="`...)
+		dst = append(dst, html.EscapeString(NormalizeURI(def.Destination))...)
+		dst = append(dst, `"`...)
+		if def.TitlePresent {
+			dst = append(dst, ` title="`...)
+			dst = append(dst, html.EscapeString(def.Title)...)
+			dst = append(dst, `"`...)
+		}
+		dst = appendAltText(dst, source, inline)
+		dst = append(dst, ">"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			dst = append(dst, ' ')
@@ -182,6 +204,40 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 			dst = appendInlineHTML(dst, source, refMap, c)
 		}
 	}
+	return dst
+}
+
+func appendAltText(dst []byte, source []byte, parent *Inline) []byte {
+	stack := []*Inline{parent}
+	hasAttr := false
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		switch curr.Kind() {
+		case TextKind:
+			if !hasAttr {
+				dst = append(dst, ` alt="`...)
+				hasAttr = true
+			}
+			dst = append(dst, curr.Text(source)...)
+		case IndentKind, SoftLineBreakKind, HardLineBreakKind:
+			if !hasAttr {
+				dst = append(dst, ` alt="`...)
+				hasAttr = true
+			}
+			dst = append(dst, ' ')
+		case LinkDestinationKind, LinkTitleKind, LinkLabelKind:
+			// Ignore.
+		default:
+			for i := len(curr.children) - 1; i >= 0; i-- {
+				stack = append(stack, curr.children[i])
+			}
+		}
+	}
+	if !hasAttr {
+		dst = append(dst, `alt="`...)
+	}
+	dst = append(dst, `"`...)
 	return dst
 }
 

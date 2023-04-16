@@ -90,7 +90,7 @@ func (inline *Inline) Text(source []byte) string {
 // LinkDestination returns the destination child of a [LinkKind] node
 // or nil if none is present or the node is not a link.
 func (inline *Inline) LinkDestination() *Inline {
-	if inline.Kind() != LinkKind {
+	if k := inline.Kind(); k != LinkKind && k != ImageKind {
 		return nil
 	}
 	for i := len(inline.children) - 1; i >= len(inline.children)-2 && i >= 0; i-- {
@@ -104,7 +104,7 @@ func (inline *Inline) LinkDestination() *Inline {
 // LinkTitle returns the title child of a [LinkKind] node
 // or nil if none is present or the node is not a link.
 func (inline *Inline) LinkTitle() *Inline {
-	if inline.Kind() != LinkKind {
+	if k := inline.Kind(); k != LinkKind && k != ImageKind {
 		return nil
 	}
 	for i := len(inline.children) - 1; i >= len(inline.children)-2 && i >= 0; i-- {
@@ -119,7 +119,7 @@ func (inline *Inline) LinkTitle() *Inline {
 //
 // [normalized form]: https://spec.commonmark.org/0.30/#matches
 func (inline *Inline) LinkReference() string {
-	if inline.Kind() == LinkKind && len(inline.children) > 0 {
+	if k := inline.Kind(); (k == LinkKind || k == ImageKind) && len(inline.children) > 0 {
 		if last := inline.children[len(inline.children)-1]; last.Kind() == LinkLabelKind {
 			// Full reference link.
 			return last.LinkReference()
@@ -324,6 +324,33 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 						},
 					})
 					pos = p.parseEndBracket(state, pos)
+					plainStart = pos
+				case '!':
+					if pos+1 >= state.spanEnd() || source[pos+1] != '[' {
+						pos++
+						continue
+					}
+					state.addToRoot(&Inline{
+						kind: TextKind,
+						span: Span{
+							Start: plainStart,
+							End:   pos,
+						},
+					})
+					node := &Inline{
+						kind: TextKind,
+						span: Span{
+							Start: pos,
+							End:   pos + 2,
+						},
+					}
+					state.addToRoot(node)
+					state.stack = append(state.stack, delimiterStackElement{
+						typ:   inlineDelimiterImage,
+						flags: activeFlag,
+						node:  node,
+					})
+					pos += 2
 					plainStart = pos
 				case ' ':
 					end, ok := parseHardLineBreakSpace(source[pos:state.spanEnd()])

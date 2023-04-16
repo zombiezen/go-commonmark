@@ -53,6 +53,7 @@ var supportedSections = map[string]struct{}{
 	"Code spans":                   {},
 	"Emphasis and strong emphasis": {},
 	"Links":                        {},
+	"Images":                       {},
 	"Raw HTML":                     {},
 	"Hard line breaks":             {},
 	"Soft line breaks":             {},
@@ -71,10 +72,7 @@ var skippedExamples = map[int]string{
 	480: "autolinks not implemented",
 	502: "entity escapes not implemented",
 	505: "entity escapes not implemented",
-	516: "images not implemented",
-	519: "images not implemented",
 	525: "autolinks not implemented",
-	530: "images not implemented",
 	537: "autolinks not implemented",
 }
 
