@@ -195,6 +195,16 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 		}
 		dst = appendAltText(dst, source, inline)
 		dst = append(dst, ">"...)
+	case AutolinkKind:
+		destination := inline.children[0].Text(source)
+		dst = append(dst, `<a href="`...)
+		if IsEmailAddress(destination) {
+			dst = append(dst, "mailto:"...)
+		}
+		dst = append(dst, html.EscapeString(NormalizeURI(destination))...)
+		dst = append(dst, `">`...)
+		dst = append(dst, html.EscapeString(destination)...)
+		dst = append(dst, "</a>"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			dst = append(dst, ' ')

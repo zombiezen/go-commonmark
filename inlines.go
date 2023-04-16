@@ -392,6 +392,33 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 						pos = cs.content.Start
 					}
 				case '<':
+					if end := parseAutolink(state.source[pos:state.spanEnd()]); end >= 0 {
+						end += pos
+						state.addToRoot(&Inline{
+							kind: TextKind,
+							span: Span{
+								Start: plainStart,
+								End:   pos,
+							},
+						})
+						state.addToRoot(&Inline{
+							kind: AutolinkKind,
+							span: Span{
+								Start: pos,
+								End:   end,
+							},
+							children: []*Inline{{
+								kind: TextKind,
+								span: Span{
+									Start: pos + 1,
+									End:   end - 1,
+								},
+							}},
+						})
+						pos = end
+						plainStart = pos
+						continue
+					}
 					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], pos)
 					span := parseHTMLTag(r)
 					if !span.IsValid() {
@@ -1332,6 +1359,103 @@ func isOnlySpaces(line []byte) bool {
 		}
 	}
 	return true
+}
+
+func parseAutolink(text []byte) (end int) {
+	const minSchemeChars = 2
+	const maxSchemeChars = 32
+
+	if len(text) < len("<:>")+minSchemeChars || text[0] != '<' {
+		return -1
+	}
+	if emailEnd := parseEmail(text[1:]); emailEnd >= 0 && 1+emailEnd < len(text) && text[1+emailEnd] == '>' {
+		return 2 + emailEnd
+	}
+
+	// Scheme.
+	if !isASCIILetter(text[1]) {
+		return -1
+	}
+	end = 2
+	for end < len(text) && (isASCIILetter(text[end]) || isASCIIDigit(text[end]) || strings.IndexByte("+.-", text[end]) >= 0) {
+		end++
+	}
+	if end < 1+minSchemeChars || end > 1+maxSchemeChars {
+		return -1
+	}
+	if end >= len(text) || text[end] != ':' {
+		return -1
+	}
+	end++
+
+	// URI.
+	for ; end < len(text); end++ {
+		switch {
+		case text[end] == '>':
+			return end + 1
+		case isASCIIControl(text[end]) || text[end] == ' ' || text[end] == '<':
+			return -1
+		}
+	}
+	return -1
+}
+
+// IsEmailAddress reports whether the string is a CommonMark [email address].
+//
+// [email address]: https://spec.commonmark.org/0.30/#email-address
+func IsEmailAddress(s string) bool {
+	return parseEmail([]byte(s)) == len(s)
+}
+
+// parseEmail parses an [email address].
+//
+// [email address]: https://spec.commonmark.org/0.30/#email-address
+func parseEmail(text []byte) (end int) {
+	for end < len(text) && (isASCIILetter(text[end]) || isASCIIDigit(text[end]) || strings.IndexByte(".!#$%&'*+/=?^_`{|}~-", text[end]) >= 0) {
+		end++
+	}
+	if end == 0 {
+		return -1
+	}
+	if end >= len(text) || text[end] != '@' {
+		return -1
+	}
+	end++
+
+	// Domain name.
+	firstLabelLength := parseDomainLabel(text[end:])
+	if firstLabelLength < 0 {
+		return -1
+	}
+	end += firstLabelLength
+	for end < len(text) && text[end] == '.' {
+		end++
+		n := parseDomainLabel(text[end:])
+		if n < 0 {
+			// Dot must be followed by label.
+			return -1
+		}
+		end += n
+	}
+	return end
+}
+
+func parseDomainLabel(text []byte) (end int) {
+	if end >= len(text) || !(isASCIILetter(text[0]) || isASCIIDigit(text[0])) {
+		return -1
+	}
+	end++
+	for end < 63 && end < len(text) && (isASCIILetter(text[end]) || isASCIIDigit(text[end]) || text[end] == '-') {
+		end++
+	}
+	if text[end-1] == '-' {
+		return -1
+	}
+	if end < len(text) && (isASCIILetter(text[end]) || isASCIIDigit(text[end]) || text[end] == '-') {
+		// Label too long.
+		return -1
+	}
+	return end
 }
 
 // parseInfoString builds a [InfoStringKind] inline span from the given text,

@@ -54,6 +54,7 @@ var supportedSections = map[string]struct{}{
 	"Emphasis and strong emphasis": {},
 	"Links":                        {},
 	"Images":                       {},
+	"Autolinks":                    {},
 	"Raw HTML":                     {},
 	"Hard line breaks":             {},
 	"Soft line breaks":             {},
@@ -61,19 +62,13 @@ var supportedSections = map[string]struct{}{
 }
 
 var skippedExamples = map[int]string{
-	20:  "autolinks not implemented",
 	59:  "setext headings not implemented",
 	115: "setext headings not implemented",
 	141: "setext headings not implemented",
 	215: "setext headings not implemented",
 	300: "setext headings not implemented",
-	346: "autolinks not implemented",
-	479: "autolinks not implemented",
-	480: "autolinks not implemented",
 	502: "entity escapes not implemented",
 	505: "entity escapes not implemented",
-	525: "autolinks not implemented",
-	537: "autolinks not implemented",
 }
 
 func TestSpec(t *testing.T) {
