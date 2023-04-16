@@ -34,31 +34,9 @@ import (
 	. "zombiezen.com/go/commonmark"
 )
 
-var supportedSections = map[string]struct{}{
-	"Tabs":                         {},
-	"Backslash escapes":            {},
-	"Precedence":                   {},
-	"Thematic breaks":              {},
-	"ATX headings":                 {},
-	"Indented code blocks":         {},
-	"Fenced code blocks":           {},
-	"HTML blocks":                  {},
-	"Link reference definitions":   {},
-	"Paragraphs":                   {},
-	"Blank lines":                  {},
-	"Block quotes":                 {},
-	"List items":                   {},
-	"Lists":                        {},
-	"Inlines":                      {},
-	"Code spans":                   {},
-	"Emphasis and strong emphasis": {},
-	"Links":                        {},
-	"Images":                       {},
-	"Autolinks":                    {},
-	"Raw HTML":                     {},
-	"Hard line breaks":             {},
-	"Soft line breaks":             {},
-	"Textual content":              {},
+var skippedSections = map[string]struct{}{
+	"Entity and numeric character references": {},
+	"Setext headings":                         {},
 }
 
 var skippedExamples = map[int]string{
@@ -88,7 +66,7 @@ func TestSpec(t *testing.T) {
 
 	for _, test := range testsuite {
 		t.Run(fmt.Sprintf("Example%d", test.Example), func(t *testing.T) {
-			if _, ok := supportedSections[test.Section]; !ok {
+			if _, shouldSkip := skippedSections[test.Section]; shouldSkip {
 				t.Skipf("Section %q not implemented yet", test.Section)
 			}
 			if skipReason := skippedExamples[test.Example]; skipReason != "" {
