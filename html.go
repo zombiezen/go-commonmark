@@ -122,7 +122,7 @@ func appendChildrenHTML(dst []byte, source []byte, refMap ReferenceMap, parent *
 
 func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *Inline) []byte {
 	switch inline.Kind() {
-	case TextKind, UnparsedKind:
+	case TextKind, UnparsedKind, CharacterReferenceKind:
 		dst = append(dst, html.EscapeString(inline.Text(source))...)
 	case RawHTMLKind:
 		dst = append(dst, inline.Text(source)...)

@@ -35,8 +35,7 @@ import (
 )
 
 var skippedSections = map[string]struct{}{
-	"Entity and numeric character references": {},
-	"Setext headings":                         {},
+	"Setext headings": {},
 }
 
 var skippedExamples = map[int]string{
@@ -45,8 +44,6 @@ var skippedExamples = map[int]string{
 	141: "setext headings not implemented",
 	215: "setext headings not implemented",
 	300: "setext headings not implemented",
-	502: "entity escapes not implemented",
-	505: "entity escapes not implemented",
 }
 
 func TestSpec(t *testing.T) {

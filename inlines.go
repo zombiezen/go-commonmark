@@ -18,6 +18,7 @@ package commonmark
 
 import (
 	"fmt"
+	"html"
 	"strings"
 	"unicode/utf8"
 
@@ -64,6 +65,8 @@ func (inline *Inline) Text(source []byte) string {
 	switch inline.Kind() {
 	case TextKind, RawHTMLKind:
 		return string(spanSlice(source, inline.Span()))
+	case CharacterReferenceKind:
+		return html.UnescapeString(string(spanSlice(source, inline.Span())))
 	case SoftLineBreakKind, HardLineBreakKind:
 		return "\n"
 	case IndentKind:
@@ -79,6 +82,8 @@ func (inline *Inline) Text(source []byte) string {
 			switch child := inline.Child(i); child.Kind() {
 			case TextKind:
 				sb.Write(spanSlice(source, child.Span()))
+			case CharacterReferenceKind:
+				sb.WriteString(html.UnescapeString(string(spanSlice(source, child.Span()))))
 			}
 		}
 		return sb.String()
@@ -186,6 +191,9 @@ const (
 	SoftLineBreakKind
 	HardLineBreakKind
 	IndentKind
+	// CharacterReferenceKind is used for ampersand escape characters
+	// (e.g. "&amp;").
+	CharacterReferenceKind
 	InfoStringKind
 	EmphasisKind
 	StrongKind
@@ -458,6 +466,28 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 					})
 					pos = p.parseBackslash(state, pos)
 					plainStart = pos
+				case '&':
+					end := parseCharacterEscape(state.source[pos:state.spanEnd()])
+					if end < 0 {
+						pos++
+						continue
+					}
+					state.addToRoot(&Inline{
+						kind: TextKind,
+						span: Span{
+							Start: plainStart,
+							End:   pos,
+						},
+					})
+					state.addToRoot(&Inline{
+						kind: CharacterReferenceKind,
+						span: Span{
+							Start: pos,
+							End:   pos + end,
+						},
+					})
+					pos += end
+					plainStart = pos
 				default:
 					pos++
 				}
@@ -519,6 +549,74 @@ func (p *InlineParser) parseBackslash(state *inlineState, start int) (end int) {
 		},
 	})
 	return end
+}
+
+func parseCharacterEscape(text []byte) (end int) {
+	if len(text) < 3 || text[0] != '&' {
+		return -1
+	}
+	if text[1] != '#' {
+		// Entity reference.
+		for i, c := range text[1:] {
+			switch {
+			case c == ';':
+				if i == 0 || !isEntity(text[:i+2]) {
+					return -1
+				}
+				return i + 2
+			case !isASCIILetter(c) && !isASCIIDigit(c):
+				return -1
+			}
+		}
+		return -1
+	}
+
+	if text[2] == 'x' || text[2] == 'X' {
+		// Hexadecimal numeric character reference.
+		const digitStart = 3
+		const digitLimit = 6
+		rest := text[digitStart:]
+		if len(rest) > digitLimit+1 {
+			rest = rest[:digitLimit+1]
+		}
+		for i, c := range rest {
+			switch {
+			case c == ';':
+				if i == 0 {
+					return -1
+				}
+				return digitStart + i + 1
+			case !isHex(c):
+				return -1
+			}
+		}
+		return -1
+	}
+
+	// Decimal numeric character reference.
+	const digitStart = 2
+	const digitLimit = 7
+	rest := text[digitStart:]
+	if len(rest) > digitLimit+1 {
+		rest = rest[:digitLimit+1]
+	}
+	for i, c := range rest {
+		switch {
+		case c == ';':
+			if i == 0 {
+				return -1
+			}
+			return digitStart + i + 1
+		case !isASCIIDigit(c):
+			return -1
+		}
+	}
+	return -1
+}
+
+func isEntity(x []byte) bool {
+	s := html.UnescapeString(string(x))
+	return !strings.HasPrefix(s, "&") || !strings.HasSuffix(s, ";")
 }
 
 func (p *InlineParser) parseDelimiterRun(state *inlineState, start int) (end int) {
@@ -1021,18 +1119,48 @@ func collectTextNodes(parent *Inline, r *inlineByteReader, end int, textKind Inl
 			continue
 		}
 
-		if escapes && curr.Kind() == UnparsedKind && r.current() == '\\' {
-			if r.next() && r.pos < end && isASCIIPunctuation(r.current()) {
-				if r.prevPos > plainStart {
+		if escapes && curr.Kind() == UnparsedKind {
+			switch r.current() {
+			case '\\':
+				if r.next() && r.pos < end && isASCIIPunctuation(r.current()) {
+					if r.prevPos > plainStart {
+						parent.children = append(parent.children, &Inline{
+							kind: textKind,
+							span: Span{
+								Start: plainStart,
+								End:   r.prevPos, // exclude backslash
+							},
+						})
+					}
+					plainStart = r.pos
+				}
+			case '&':
+				if end := parseCharacterEscape(r.remainingNodeBytes()); end >= 0 {
+					if r.pos > plainStart {
+						parent.children = append(parent.children, &Inline{
+							kind: textKind,
+							span: Span{
+								Start: plainStart,
+								End:   r.pos,
+							},
+						})
+					}
 					parent.children = append(parent.children, &Inline{
-						kind: textKind,
+						kind: CharacterReferenceKind,
 						span: Span{
-							Start: plainStart,
-							End:   r.prevPos, // exclude backslash
+							Start: r.pos,
+							End:   r.pos + end,
 						},
 					})
+					plainStart = r.pos + end
+					for i := 0; i < end-1; i++ {
+						r.next()
+					}
+					if !r.next() {
+						break
+					}
+					continue
 				}
-				plainStart = r.pos
 			}
 		}
 
@@ -1468,7 +1596,6 @@ func parseInfoString(source []byte, span Span) *Inline {
 		span: span,
 	}
 	for i := span.Start; i < span.End; {
-		// TODO(soon): Entity escapes.
 		switch source[i] {
 		case '\\':
 			if i+1 >= span.End || !isASCIIPunctuation(source[i+1]) {
@@ -1492,6 +1619,30 @@ func parseInfoString(source []byte, span Span) *Inline {
 				},
 			})
 			i += 2
+			plainStart = i
+		case '&':
+			end := parseCharacterEscape(source[i:span.End])
+			if end < 0 {
+				i++
+				continue
+			}
+			if plainStart < i {
+				node.children = append(node.children, &Inline{
+					kind: TextKind,
+					span: Span{
+						Start: plainStart,
+						End:   i,
+					},
+				})
+			}
+			node.children = append(node.children, &Inline{
+				kind: CharacterReferenceKind,
+				span: Span{
+					Start: i,
+					End:   i + end,
+				},
+			})
+			i += end
 			plainStart = i
 		default:
 			i++
