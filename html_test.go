@@ -34,18 +34,6 @@ import (
 	. "zombiezen.com/go/commonmark"
 )
 
-var skippedSections = map[string]struct{}{
-	"Setext headings": {},
-}
-
-var skippedExamples = map[int]string{
-	59:  "setext headings not implemented",
-	115: "setext headings not implemented",
-	141: "setext headings not implemented",
-	215: "setext headings not implemented",
-	300: "setext headings not implemented",
-}
-
 func TestSpec(t *testing.T) {
 	testsuiteData, err := os.ReadFile(filepath.Join("testdata", "spec-0.30.json"))
 	if err != nil {
@@ -63,12 +51,6 @@ func TestSpec(t *testing.T) {
 
 	for _, test := range testsuite {
 		t.Run(fmt.Sprintf("Example%d", test.Example), func(t *testing.T) {
-			if _, shouldSkip := skippedSections[test.Section]; shouldSkip {
-				t.Skipf("Section %q not implemented yet", test.Section)
-			}
-			if skipReason := skippedExamples[test.Example]; skipReason != "" {
-				t.Skip("Skipped:", skipReason)
-			}
 			blocks, refMap := Parse([]byte(test.Markdown))
 			buf := new(bytes.Buffer)
 			if err := RenderHTML(buf, blocks, refMap); err != nil {

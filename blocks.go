@@ -101,7 +101,7 @@ func (b *Block) Child(i int) Node {
 
 func (b *Block) HeadingLevel() int {
 	switch b.Kind() {
-	case ATXHeadingKind:
+	case ATXHeadingKind, SetextHeadingKind:
 		return b.n
 	default:
 		return 0
@@ -394,6 +394,12 @@ func (p *lineParser) ContainerKind() BlockKind {
 	return p.container.kind
 }
 
+// MorphSetext changes the kind of the container block to [SetextHeadingKind].
+func (p *lineParser) MorphSetext(level int) {
+	p.container.kind = SetextHeadingKind
+	p.container.n = level
+}
+
 // TipKind returns the kind of the deepest open block.
 func (p *lineParser) TipKind() BlockKind {
 	return findTip(&p.root).kind
@@ -663,6 +669,24 @@ var blockStarts = []func(*lineParser){
 		}
 	},
 
+	// Setext heading.
+	func(p *lineParser) {
+		if p.ContainerKind() != ParagraphKind {
+			return
+		}
+		indent := p.Indent()
+		if indent >= codeBlockIndentLimit {
+			return
+		}
+		level := parseSetextHeadingUnderline(p.BytesAfterIndent())
+		if level == 0 {
+			return
+		}
+		p.MorphSetext(level)
+		p.ConsumeLine()
+		p.EndBlock()
+	},
+
 	// Thematic break.
 	func(p *lineParser) {
 		indent := p.Indent()
@@ -894,6 +918,9 @@ var blocks = map[BlockKind]blockRule{
 		acceptsLines: true,
 		onClose:      onCloseParagraph,
 	},
+	SetextHeadingKind: {
+		onClose: onCloseParagraph,
+	},
 }
 
 // parseThematicBreak attempts to parse the line as a [thematic break].
@@ -1013,6 +1040,35 @@ scanTrailingHashes:
 	return h
 }
 
+// parseSetextHeadingUnderline returns the line's heading level
+// if it is a [setext heading underline],
+// or zero otherwise.
+// parseSetextHeadingUnderline assumes that the caller has stripped any leading indentation.
+//
+// [setext heading underline]: https://spec.commonmark.org/0.30/#setext-heading-underline
+func parseSetextHeadingUnderline(line []byte) (level int) {
+	if len(line) == 0 {
+		return 0
+	}
+	switch line[0] {
+	case '=':
+		level = 1
+	case '-':
+		level = 2
+	default:
+		return 0
+	}
+	for i := 1; i < len(line); i++ {
+		if line[i] != line[0] {
+			if !isBlankLine(line[i:]) {
+				return 0
+			}
+			return level
+		}
+	}
+	return level
+}
+
 type codeFence struct {
 	char byte // either '`' or '~'
 	n    int
@@ -1117,7 +1173,7 @@ func (m listMarker) isOrdered() bool {
 	return m.delim == '.' || m.delim == ')'
 }
 
-// onCloseParagraph handles the closing of a paragraph block
+// onCloseParagraph handles the closing of a paragraph block or a [SetextHeadingBlock]
 // by searching its beginning for link reference definitions.
 func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 	if len(originalBlock.inlineChildren) == 0 {
@@ -1125,6 +1181,28 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 	}
 
 	contentStart := originalBlock.inlineChildren[0].Span().Start
+	var setextOrphanParagraph *Block
+	if originalBlock.Kind() == SetextHeadingKind {
+		blockStart := originalBlock.inlineChildren[len(originalBlock.inlineChildren)-1].Span().End
+		lineStart := blockStart
+		for source[lineStart] == ' ' || source[lineStart] == '\t' {
+			lineStart++
+		}
+		setextOrphanParagraph = &Block{
+			kind: ParagraphKind,
+			span: Span{
+				Start: blockStart,
+				End:   -1,
+			},
+			inlineChildren: []*Inline{{
+				kind: UnparsedKind,
+				span: Span{
+					Start: lineStart,
+					End:   originalBlock.Span().End,
+				},
+			}},
+		}
+	}
 	r := newInlineByteReader(source, originalBlock.inlineChildren, contentStart)
 	var result []*Block
 	for {
@@ -1190,7 +1268,11 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 		if !skipLinkSpace(r) {
 			// We hit EOF before encountering anything else.
 			newBlock.span.End = destinationEOL
-			return append(result, newBlock)
+			result = append(result, newBlock)
+			if setextOrphanParagraph != nil {
+				result = append(result, setextOrphanParagraph)
+			}
+			return result
 		}
 
 		// Parse title, if present.
@@ -1210,6 +1292,9 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 			originalBlock.span.Start = cloned.pos
 			firstChild := nodeIndexForPosition(originalBlock.inlineChildren, cloned.pos)
 			if firstChild < 0 {
+				if setextOrphanParagraph != nil {
+					result = append(result, setextOrphanParagraph)
+				}
 				return result
 			}
 			originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
@@ -1237,6 +1322,9 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 			originalBlock.span.Start = cloned.pos
 			firstChild := nodeIndexForPosition(originalBlock.inlineChildren, cloned.pos)
 			if firstChild < 0 {
+				if setextOrphanParagraph != nil {
+					result = append(result, setextOrphanParagraph)
+				}
 				return result
 			}
 			originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
@@ -1262,6 +1350,9 @@ func onCloseParagraph(source []byte, originalBlock *Block) []*Block {
 		originalBlock.span.Start = r.pos
 		firstChild := nodeIndexForPosition(originalBlock.inlineChildren, r.pos)
 		if firstChild < 0 {
+			if setextOrphanParagraph != nil {
+				result = append(result, setextOrphanParagraph)
+			}
 			return result
 		}
 		originalBlock.inlineChildren = originalBlock.inlineChildren[firstChild:]
