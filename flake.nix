@@ -15,11 +15,15 @@
       };
     in
     {
+      packages.commonmark-js = (pkgs.callPackage ./nix/commonmark.js {})."commonmark-0.30.0";
+
       devShells.default = pkgs.mkShell {
         packages = [
           pkgs.cmark
           pkgs.go-tools
           pkgs.go_1_20
+          pkgs.node2nix
+          self.packages.${system}.commonmark-js
         ];
       };
     }) // {
