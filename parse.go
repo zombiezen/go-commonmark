@@ -49,7 +49,7 @@ type BlockParser struct {
 // Block parsers maintain their own buffering and may read data from r
 // beyond the blocks requested.
 func NewBlockParser(r io.Reader) *BlockParser {
-	return &BlockParser{r: r}
+	return &BlockParser{r: r, lineno: 1}
 }
 
 // Parse parses an in-memory CommonMark document and returns its blocks.
@@ -433,18 +433,17 @@ func (p *BlockParser) readline() bool {
 			break
 		}
 
-		// If we're already at the maximum block size,
-		// then drop the line and pretend it's an EOF.
-		if len(p.buf) >= maxBlockSize {
-			p.buf = p.buf[:p.i]
-			p.err = fmt.Errorf("line %d: block too large", p.lineno)
-			return false
-		}
-
-		// Grab more data from the reader.
+		// Grab more data from the reader if possible.
 		newSize := len(p.buf) + chunkSize
-		if newSize > maxBlockSize {
-			newSize = maxBlockSize
+		if len(p.buf)+chunkSize*len(nullReplacementString) > maxBlockSize {
+			newSize = len(p.buf) + (maxBlockSize-len(p.buf))/len(nullReplacementString)
+		}
+		if newSize <= len(p.buf) {
+			// If we're already at the maximum block size,
+			// then drop the line and pretend it's an EOF.
+			p.buf = p.buf[:p.i]
+			p.err = fmt.Errorf("line %d: block too large", p.lineno+lineCount(p.buf[:p.i]))
+			return false
 		}
 		if cap(p.buf) < newSize {
 			newbuf := make([]byte, len(p.buf), newSize)
@@ -453,7 +452,7 @@ func (p *BlockParser) readline() bool {
 		}
 		var n int
 		n, p.err = p.r.Read(p.buf[len(p.buf):newSize])
-		p.buf = p.buf[:len(p.buf)+n]
+		p.buf = replaceNulls(p.buf[:len(p.buf)+n], len(p.buf))
 	}
 
 	ok := p.i < eolEnd
@@ -491,6 +490,41 @@ func columnWidth(start int, b []byte) int {
 		}
 	}
 	return end - start
+}
+
+const nullReplacementString = "\ufffd"
+
+// replaceNulls replaces zero bytes that occur at or after a starting index
+// with the Unicode Replacement Character.
+func replaceNulls(b []byte, start int) []byte {
+	n := 0
+	for _, bb := range b[start:] {
+		if bb == 0 {
+			n++
+		}
+	}
+	if n == 0 {
+		return b
+	}
+	oldLen := len(b)
+	newLen := len(b) + n*(len(nullReplacementString)-1)
+	if newLen > cap(b) {
+		b = append(b[:cap(b)], make([]byte, newLen-cap(b))...)[:newLen]
+	} else {
+		b = b[:newLen]
+	}
+	for i, j := oldLen-1, newLen-1; i >= start; i-- {
+		if b[i] == 0 {
+			for k := len(nullReplacementString) - 1; k >= 0; k-- {
+				b[j] = nullReplacementString[k]
+				j--
+			}
+		} else {
+			b[j] = b[i]
+			j--
+		}
+	}
+	return b
 }
 
 // indentLength returns the number of space or tab bytes
