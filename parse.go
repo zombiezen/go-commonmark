@@ -317,6 +317,17 @@ func addLineText(p *lineParser) {
 			End:   p.lineStart + len(p.line),
 		},
 	})
+	if p.ContainerKind().IsCode() && !hasByteSuffix(p.line, "\n") && !hasByteSuffix(p.line, "\r") {
+		// For code blocks that end at EOF, insert a soft line break
+		// to have whitespace consistent with files with a trailing newline.
+		p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
+			kind: SoftLineBreakKind,
+			span: Span{
+				Start: p.lineStart + len(p.line),
+				End:   p.lineStart + len(p.line),
+			},
+		})
+	}
 }
 
 func findParent(root *Block, b *Block) *Block {
@@ -620,4 +631,16 @@ func contains(b []byte, search string) bool {
 		}
 	}
 	return false
+}
+
+func hasByteSuffix(b []byte, suffix string) bool {
+	if len(b) < len(suffix) {
+		return false
+	}
+	for i, bb := range b[len(b)-len(suffix):] {
+		if suffix[i] != bb {
+			return false
+		}
+	}
+	return true
 }

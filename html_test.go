@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 	"unicode"
 
@@ -35,21 +37,7 @@ import (
 )
 
 func TestSpec(t *testing.T) {
-	testsuiteData, err := os.ReadFile(filepath.Join("testdata", "spec-0.30.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var testsuite []struct {
-		Markdown string
-		HTML     string
-		Example  int
-		Section  string
-	}
-	if err := json.Unmarshal(testsuiteData, &testsuite); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, test := range testsuite {
+	for _, test := range loadTestSuite(t) {
 		t.Run(fmt.Sprintf("Example%d", test.Example), func(t *testing.T) {
 			blocks, refMap := Parse([]byte(test.Markdown))
 			buf := new(bytes.Buffer)
@@ -63,6 +51,80 @@ func TestSpec(t *testing.T) {
 			}
 		})
 	}
+}
+
+func FuzzCommonMarkJS(f *testing.F) {
+	commonmarkArgs := nixShellCommand(f, "commonmark-js", "commonmark")
+	for _, test := range loadTestSuite(f) {
+		f.Add(test.Markdown)
+	}
+
+	f.Fuzz(func(t *testing.T, markdown string) {
+		blocks, refMap := Parse([]byte(markdown))
+		buf := new(bytes.Buffer)
+		if err := RenderHTML(buf, blocks, refMap); err != nil {
+			t.Error("RenderHTML:", err)
+		}
+		got := string(normalizeHTML(buf.Bytes()))
+
+		c := exec.Command(commonmarkArgs[0], commonmarkArgs[1:]...)
+		c.Stdin = strings.NewReader(markdown)
+		c.Stderr = os.Stderr
+		rawWant, err := c.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := string(normalizeHTML(rawWant))
+
+		if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("Input:\n%s\nOutput (-want +got):\n%s", markdown, diff)
+		}
+	})
+}
+
+func nixShellCommand(tb testing.TB, pkg string, programName string) []string {
+	tb.Helper()
+
+	nixExe, err := exec.LookPath("nix")
+	if err != nil {
+		tb.Logf("Could not find Nix (falling back to using %s directly): %v", programName, err)
+		exe, err := exec.LookPath(programName)
+		if err != nil {
+			tb.Skip(err)
+		}
+		return []string{exe}
+	}
+
+	return []string{
+		nixExe,
+		"--extra-experimental-features", "nix-command flakes",
+		"shell",
+		".#" + pkg,
+		"--quiet",
+		"--no-warn-dirty",
+		"--command", programName,
+	}
+}
+
+type specExample struct {
+	Markdown string
+	HTML     string
+	Example  int
+	Section  string
+}
+
+func loadTestSuite(tb testing.TB) []specExample {
+	tb.Helper()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "spec-0.30.json"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var testsuite []specExample
+	if err := json.Unmarshal(data, &testsuite); err != nil {
+		tb.Fatal(err)
+	}
+	return testsuite
 }
 
 var whitespaceRE = regexp.MustCompile(`\s+`)
