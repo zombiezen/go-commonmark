@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -60,6 +61,9 @@ func FuzzCommonMarkJS(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, markdown string) {
+		if !utf8.ValidString(markdown) {
+			t.Skip("Invalid UTF-8")
+		}
 		blocks, refMap := Parse([]byte(markdown))
 		buf := new(bytes.Buffer)
 		if err := RenderHTML(buf, blocks, refMap); err != nil {

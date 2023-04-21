@@ -985,7 +985,7 @@ func parseATXHeading(line []byte) atxHeading {
 	i++
 
 	// Advance past leading whitespace.
-	for i < len(line) && line[i] == ' ' || line[i] == '\t' {
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
 		i++
 	}
 	h.content.Start = i
