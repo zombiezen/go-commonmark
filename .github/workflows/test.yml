@@ -23,7 +23,7 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v3
       - name: Run tests
-        run: nix develop --command go test -mod=readonly -race ./...
+        run: nix develop --command go test -mod=readonly -race -v ./...
   windows:
     name: go test (Windows)
     runs-on: windows-2022
@@ -35,4 +35,4 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v3
       - name: Run tests
-        run: go test -mod=readonly -race ./...
+        run: go test -mod=readonly -race -v ./...
