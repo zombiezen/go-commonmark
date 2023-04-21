@@ -281,8 +281,20 @@ func addLineText(p *lineParser) {
 		c.lastLineBlank = lastLineBlank
 	}
 
-	switch {
-	case blocks[p.ContainerKind()].acceptsLines:
+	switch k := p.ContainerKind(); {
+	case blocks[k].acceptsLines && k.IsCode():
+		if p.i < len(p.line) && p.line[p.i] == '\t' && p.tabRemaining > 0 && p.tabRemaining < tabStopSize {
+			p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
+				kind:   IndentKind,
+				indent: int(p.tabRemaining),
+				span: Span{
+					Start: p.lineStart + p.i,
+					End:   p.lineStart + p.i + 1,
+				},
+			})
+			p.ConsumeIndent(int(p.tabRemaining))
+		}
+	case blocks[k].acceptsLines && !k.IsCode():
 		if indent := p.Indent(); indent > 0 {
 			start := p.lineStart + p.i
 			p.ConsumeIndent(indent)
