@@ -178,7 +178,7 @@ func (b *Block) close(source []byte, parent *Block, end int) {
 	}
 	for ; b.isOpen(); parent, b = b, b.lastChild().Block() {
 		b.span.End = end
-		if f := blocks[b.kind].onClose; f != nil {
+		if f := blockRules[b.kind].onClose; f != nil {
 			replacement := f(source, b)
 			parent.blockChildren = append(parent.blockChildren[:len(parent.blockChildren)-1], replacement...)
 		}
@@ -486,7 +486,7 @@ func (p *lineParser) openBlock(kind BlockKind) {
 
 	// Move up the tree until we find a block that can handle the new child.
 	for {
-		if rule := blocks[p.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
+		if rule := blockRules[p.ContainerKind()]; rule.canContain != nil && rule.canContain(kind) {
 			break
 		}
 		parent := findParent(&p.root, p.container)
@@ -763,7 +763,7 @@ type blockRule struct {
 	acceptsLines bool
 }
 
-var blocks = map[BlockKind]blockRule{
+var blockRules = map[BlockKind]blockRule{
 	documentKind: {
 		match:      func(*lineParser) bool { return true },
 		canContain: func(childKind BlockKind) bool { return childKind != ListItemKind },

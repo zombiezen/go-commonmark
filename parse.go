@@ -186,7 +186,7 @@ func descendOpenBlocks(p *lineParser) (allMatched bool) {
 	parent := &p.root
 	p.container = parent.lastChild().Block()
 	for p.container.isOpen() {
-		rule := blocks[p.ContainerKind()]
+		rule := blockRules[p.ContainerKind()]
 		if rule.match == nil {
 			p.container = parent
 			return false
@@ -249,7 +249,7 @@ func openNewBlocks(p *lineParser, allMatched bool) (hasText bool) {
 	}
 
 openingLoop:
-	for p.ContainerKind() == ParagraphKind || !blocks[p.ContainerKind()].acceptsLines {
+	for p.ContainerKind() == ParagraphKind || !blockRules[p.ContainerKind()].acceptsLines {
 		for _, startFunc := range blockStarts {
 			p.state = stateOpening
 			startFunc(p)
@@ -282,7 +282,7 @@ func addLineText(p *lineParser) {
 	}
 
 	switch k := p.ContainerKind(); {
-	case blocks[k].acceptsLines && k.IsCode():
+	case blockRules[k].acceptsLines && k.IsCode():
 		if p.i < len(p.line) && p.line[p.i] == '\t' && p.tabRemaining > 0 && p.tabRemaining < tabStopSize {
 			p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 				kind:   IndentKind,
@@ -294,7 +294,7 @@ func addLineText(p *lineParser) {
 			})
 			p.ConsumeIndent(int(p.tabRemaining))
 		}
-	case blocks[k].acceptsLines && !k.IsCode():
+	case blockRules[k].acceptsLines && !k.IsCode():
 		if indent := p.Indent(); indent > 0 {
 			start := p.lineStart + p.i
 			p.ConsumeIndent(indent)
