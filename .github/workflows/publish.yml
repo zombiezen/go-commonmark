@@ -22,17 +22,8 @@ jobs:
   go-get:
     name: go get
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - name: Install Nix
-        uses: cachix/install-nix-action@v20
-      - name: Check out code
-        uses: actions/checkout@v3
       - name: Fetch release from proxy
         run: |
-          mkdir -p ${{runner.temp}}/empty
-          cd ${{runner.temp}}/empty
-          nix develop \
-            "$GITHUB_WORKSPACE" \
-            --command go get -d zombiezen.com/go/commonmark@"$(echo "$GITHUB_REF" | sed -e 's:^refs/tags/::')"
+          curl -fsSL "https://proxy.golang.org/zombiezen.com/go/commonmark/@v/$(echo "$GITHUB_REF" | sed -e 's:^refs/tags/::').info"
