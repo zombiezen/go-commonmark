@@ -25,6 +25,9 @@ import (
 	"unicode/utf8"
 )
 
+// RenderHTML writes the given sequence of parsed blocks
+// to the given writer as HTML.
+// It will return the first error encountered, if any.
 func RenderHTML(w io.Writer, blocks []*RootBlock, refMap ReferenceMap) error {
 	var buf []byte
 	for i, b := range blocks {

@@ -52,7 +52,7 @@ func NewBlockParser(r io.Reader) *BlockParser {
 	return &BlockParser{r: r, lineno: 1}
 }
 
-// Parse parses an in-memory CommonMark document and returns its blocks.
+// Parse parses an in-memory UTF-8 CommonMark document and returns its blocks.
 // As long as source does not contain NUL bytes,
 // the blocks will use the original byte slice as their source.
 func Parse(source []byte) ([]*RootBlock, ReferenceMap) {
