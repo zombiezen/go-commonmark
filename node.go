@@ -38,13 +38,25 @@ func (n Node) Block() *Block {
 	return (*Block)(n.ptr)
 }
 
-// Inline returns the referenced block
+// Inline returns the referenced inline
 // or nil if the pointer does not reference an inline.
 func (n Node) Inline() *Inline {
 	if n.typ != nodeTypeInline {
 		return nil
 	}
 	return (*Inline)(n.ptr)
+}
+
+// Span returns the span of the referenced node
+// or an invalid span if the pointer is nil.
+func (n Node) Span() Span {
+	if b := n.Block(); b != nil {
+		return b.Span()
+	}
+	if i := n.Inline(); i != nil {
+		return i.Span()
+	}
+	return NullSpan()
 }
 
 // AsNode converts the inline node to a [Node] pointer.

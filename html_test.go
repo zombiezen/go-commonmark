@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package commonmark_test
+package commonmark
 
 import (
 	"bytes"
@@ -34,7 +34,6 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"go4.org/bytereplacer"
 	"golang.org/x/net/html"
-	. "zombiezen.com/go/commonmark"
 )
 
 func TestSpec(t *testing.T) {
@@ -55,6 +54,10 @@ func TestSpec(t *testing.T) {
 }
 
 func FuzzCommonMarkJS(f *testing.F) {
+	if testing.Short() {
+		f.Skip("Skipping due to -short")
+	}
+
 	commonmarkArgs := nixShellCommand(f, "commonmark-js", "commonmark")
 	for _, test := range loadTestSuite(f) {
 		f.Add(test.Markdown)

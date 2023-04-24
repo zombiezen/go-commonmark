@@ -21,6 +21,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestInsecureCharacters(t *testing.T) {
@@ -78,5 +79,73 @@ func TestInsecureCharacters(t *testing.T) {
 				t.Errorf("blocks[0].Child(0).Inline().Text(...) = %q; want %q", got, want)
 			}
 		})
+	}
+}
+
+func FuzzBlockParsing(f *testing.F) {
+	for _, test := range loadTestSuite(f) {
+		f.Add(test.Markdown)
+	}
+
+	f.Fuzz(func(t *testing.T, markdown string) {
+		if !utf8.ValidString(markdown) {
+			t.Skip("Invalid UTF-8")
+		}
+		p := NewBlockParser(strings.NewReader(markdown))
+		for i := 0; ; i++ {
+			block, err := p.NextBlock()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Verify position information.
+			if block.StartOffset > int64(len(markdown)) {
+				t.Errorf("blocks[%d]: StartOffset = %d; want <%d", i, block.StartOffset, len(markdown))
+				continue
+			}
+			if block.StartOffset+int64(len(block.Source)) > int64(len(markdown)) {
+				t.Errorf("blocks[%d]: StartOffset = %d, len(Source) = %d, StartOffset+len(Source) = %d; want <%d", i, block.StartOffset, len(block.Source), block.StartOffset+int64(len(block.Source)), len(markdown))
+				continue
+			}
+			if want := markdown[block.StartOffset : int(block.StartOffset)+len(block.Source)]; string(block.Source) != want {
+				t.Errorf("blocks[%d]: for StartOffset=%d, Source = %q; want %q", i, block.StartOffset, block.Source, want)
+			}
+			if want := lineCount([]byte(markdown[:block.StartOffset])) + 1; block.StartLine != want {
+				t.Errorf("blocks[%d]: for StartOffset=%d, StartLine = %d; want %d", i, block.StartOffset, block.StartLine, want)
+			}
+
+			// Verify span content.
+			verifySpansDontExceedParents(t, block.AsNode(), Span{
+				Start: 0,
+				End:   len(block.Source),
+			})
+		}
+	})
+}
+
+func verifySpansDontExceedParents(tb testing.TB, n Node, parentSpan Span) {
+	tb.Helper()
+
+	if b := n.Block(); b != nil {
+		ns := b.Span()
+		if ns.Start < parentSpan.Start || ns.End > parentSpan.End {
+			tb.Errorf("%v node span %v exceeds parent span %v", b.Kind(), ns, parentSpan)
+		}
+		for i := 0; i < b.ChildCount(); i++ {
+			verifySpansDontExceedParents(tb, b.Child(i), b.Span())
+		}
+	}
+
+	if inline := n.Inline(); inline != nil {
+		ns := inline.Span()
+		if ns.Start < parentSpan.Start || ns.End > parentSpan.End {
+			tb.Errorf("%v node span %v exceeds parent span %v", inline.Kind(), ns, parentSpan)
+		}
+		for i := 0; i < inline.ChildCount(); i++ {
+			verifySpansDontExceedParents(tb, inline.Child(i).AsNode(), inline.Span())
+		}
 	}
 }
