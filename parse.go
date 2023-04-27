@@ -33,7 +33,7 @@ const tabStopSize = 4
 
 // A BlockParser splits a CommonMark document into blocks.
 type BlockParser struct {
-	buf    []byte // current block being parsed
+	buf    []byte // current block being parsed (run through padNulls)
 	offset int64  // offset from beginning of stream to beginning of buf
 	lineno int    // line number of beginning of buf
 	i      int    // parse position within buf
@@ -56,11 +56,7 @@ func NewBlockParser(r io.Reader) *BlockParser {
 // As long as source does not contain NUL bytes,
 // the blocks will use the original byte slice as their source.
 func Parse(source []byte) ([]*RootBlock, ReferenceMap) {
-	if bytes.IndexByte(source, 0) >= 0 {
-		// Contains one or more NUL bytes.
-		// Replace with Unicode replacement character.
-		source = bytes.ReplaceAll(source, []byte{0}, []byte("\ufffd"))
-	}
+	source = padNulls(source[:len(source):len(source)], 0)
 	p := &BlockParser{
 		buf: source,
 		err: io.EOF,
@@ -104,7 +100,7 @@ func (p *BlockParser) NextBlock() (*RootBlock, error) {
 	} else {
 		// If we don't have any pending blocks,
 		// then we either just started or we previously hit a blank line.
-		p.offset += int64(p.i)
+		p.offset += int64(unpaddedNullLength(p.buf[:p.i]))
 		p.lineno += lineCount(p.buf[:p.i])
 		p.buf = p.buf[p.i:]
 		p.i = 0
@@ -117,7 +113,7 @@ func (p *BlockParser) NextBlock() (*RootBlock, error) {
 			if !isBlankLine(p.buf[:p.i]) {
 				break
 			}
-			p.offset += int64(p.i)
+			p.offset += int64(unpaddedNullLength(p.buf[:p.i]))
 			p.lineno++
 			p.buf = p.buf[p.i:]
 			p.i = 0
@@ -150,12 +146,15 @@ func (p *BlockParser) makeRoot(docChildren []*Block) *RootBlock {
 		return nil
 	}
 	n := docChildren[0].Span().End
+	originalLength := int64(unpaddedNullLength(p.buf[:n]))
 	block := &RootBlock{
 		Source:      p.buf[:n:n],
 		StartLine:   p.lineno,
 		StartOffset: p.offset,
+		EndOffset:   p.offset + originalLength,
 		Block:       *docChildren[0],
 	}
+	fillNulls(block.Source)
 
 	// Store any remaining children for later use, updating offsets.
 	p.blocks = docChildren[1:]
@@ -164,7 +163,7 @@ func (p *BlockParser) makeRoot(docChildren []*Block) *RootBlock {
 	}
 
 	// Advance parser state.
-	p.offset += int64(n)
+	p.offset += originalLength
 	p.lineno += lineCount(p.buf[:n])
 	p.buf = p.buf[n:]
 	p.i -= n
@@ -452,7 +451,7 @@ func (p *BlockParser) readline() bool {
 		}
 		var n int
 		n, p.err = p.r.Read(p.buf[len(p.buf):newSize])
-		p.buf = replaceNulls(p.buf[:len(p.buf)+n], len(p.buf))
+		p.buf = padNulls(p.buf[:len(p.buf)+n], len(p.buf))
 	}
 
 	ok := p.i < eolEnd
@@ -494,15 +493,11 @@ func columnWidth(start int, b []byte) int {
 
 const nullReplacementString = "\ufffd"
 
-// replaceNulls replaces zero bytes that occur at or after a starting index
-// with the Unicode Replacement Character.
-func replaceNulls(b []byte, start int) []byte {
-	n := 0
-	for _, bb := range b[start:] {
-		if bb == 0 {
-			n++
-		}
-	}
+// padNulls replaces zero bytes that occur at or after a starting index
+// with the same number of zero bytes
+// as the UTF-8 byte width of the Unicode Replacement Chracter.
+func padNulls(b []byte, start int) []byte {
+	n := nullCount(b[start:])
 	if n == 0 {
 		return b
 	}
@@ -515,8 +510,8 @@ func replaceNulls(b []byte, start int) []byte {
 	}
 	for i, j := oldLen-1, newLen-1; i >= start; i-- {
 		if b[i] == 0 {
-			for k := len(nullReplacementString) - 1; k >= 0; k-- {
-				b[j] = nullReplacementString[k]
+			for k := 0; k < len(nullReplacementString); k++ {
+				b[j] = 0
 				j--
 			}
 		} else {
@@ -525,6 +520,33 @@ func replaceNulls(b []byte, start int) []byte {
 		}
 	}
 	return b
+}
+
+func nullCount(b []byte) int {
+	n := 0
+	for _, bb := range b {
+		if bb == 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// unpaddedNullLength returns the length of the original byte slice passed to [padNulls]
+// given a slice returned by [padNulls].
+func unpaddedNullLength(b []byte) int {
+	return len(b) - nullCount(b)/len(nullReplacementString)*(len(nullReplacementString)-1)
+}
+
+// fillNulls replaces a byte slice padded by [padNulls]
+// with the UTF-8 sequence for the Unicode Replacement Character.
+func fillNulls(b []byte) {
+	for i := range b {
+		if b[i] != 0 {
+			continue
+		}
+		copy(b[i:], nullReplacementString)
+	}
 }
 
 // indentLength returns the number of space or tab bytes

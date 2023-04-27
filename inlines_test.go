@@ -16,7 +16,31 @@
 
 package commonmark
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+)
+
+func TestNullReplacementInReference(t *testing.T) {
+	const input = "[foo][foo\x00bar]\n" +
+		"\n" +
+		"[foo\ufffdbar]: https://www.example.com/"
+	const wantHTML = `<p><a href="https://www.example.com/">foo</a></p>`
+
+	blocks, refMap := Parse([]byte(input))
+	buf := new(bytes.Buffer)
+	if err := RenderHTML(buf, blocks, refMap); err != nil {
+		t.Error("RenderHTML:", err)
+	}
+	got := string(normalizeHTML(buf.Bytes()))
+	want := string(normalizeHTML([]byte(wantHTML)))
+	if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("Input:\n%s\nOutput (-want +got):\n%s", input, diff)
+	}
+}
 
 func TestDelimiterFlags(t *testing.T) {
 	tests := []struct {

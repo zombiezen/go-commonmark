@@ -28,9 +28,20 @@ import (
 // All other position information in the tree
 // is relative to the beginning of the root block.
 type RootBlock struct {
-	Source      []byte
-	StartLine   int
+	// Source holds the bytes of the block read from the original source.
+	// Any NUL bytes will have been replaced with the Unicode Replacement Character.
+	Source []byte
+	// StartLine is the 1-based line number of the first line of the block.
+	StartLine int
+	// StartOffset is the byte offset from the beginning of the original source
+	// that this block starts at.
 	StartOffset int64
+	// EndOffset is the byte offset from the beginning of the original source
+	// that this block ends at.
+	// Unless the original source contained NUL bytes,
+	// EndOffset = StartOffset + len(Source).
+	EndOffset int64
+
 	Block
 }
 
@@ -1367,7 +1378,7 @@ func skipSpacesAndTabs(r *inlineByteReader) bool {
 			return false
 		}
 	}
-	return true
+	return r.current() != 0
 }
 
 // readEOL skips over any trailing spaces

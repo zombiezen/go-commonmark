@@ -102,19 +102,26 @@ func FuzzBlockParsing(f *testing.F) {
 			}
 
 			// Verify position information.
+			offsetsValid := true
 			if block.StartOffset > int64(len(markdown)) {
-				t.Errorf("blocks[%d]: StartOffset = %d; want <%d", i, block.StartOffset, len(markdown))
-				continue
+				t.Errorf("blocks[%d]: StartOffset = %d; want <=%d", i, block.StartOffset, len(markdown))
+				offsetsValid = false
 			}
-			if block.StartOffset+int64(len(block.Source)) > int64(len(markdown)) {
-				t.Errorf("blocks[%d]: StartOffset = %d, len(Source) = %d, StartOffset+len(Source) = %d; want <%d", i, block.StartOffset, len(block.Source), block.StartOffset+int64(len(block.Source)), len(markdown))
-				continue
+			if block.EndOffset > int64(len(markdown)) {
+				t.Errorf("blocks[%d]: EndOffset = %d; want <=%d", i, block.EndOffset, len(markdown))
+				offsetsValid = false
 			}
-			if want := markdown[block.StartOffset : int(block.StartOffset)+len(block.Source)]; string(block.Source) != want {
-				t.Errorf("blocks[%d]: for StartOffset=%d, Source = %q; want %q", i, block.StartOffset, block.Source, want)
+			if block.StartOffset > block.EndOffset {
+				t.Errorf("blocks[%d]: StartOffset = %d > EndOffset = %d; want StartOffset <= EndOffset", i, block.StartOffset, block.EndOffset)
+				offsetsValid = false
 			}
-			if want := lineCount([]byte(markdown[:block.StartOffset])) + 1; block.StartLine != want {
-				t.Errorf("blocks[%d]: for StartOffset=%d, StartLine = %d; want %d", i, block.StartOffset, block.StartLine, want)
+			if offsetsValid {
+				if want := strings.ReplaceAll(markdown[block.StartOffset:block.EndOffset], "\x00", "\ufffd"); string(block.Source) != want {
+					t.Errorf("blocks[%d]: for StartOffset=%d, EndOffset=%d, Source = %q; want %q", i, block.StartOffset, block.EndOffset, block.Source, want)
+				}
+				if want := 1 + lineCount([]byte(markdown[:block.StartOffset])); block.StartLine != want {
+					t.Errorf("blocks[%d]: for StartOffset=%d, StartLine = %d; want %d", i, block.StartOffset, block.StartLine, want)
+				}
 			}
 
 			// Verify span content.

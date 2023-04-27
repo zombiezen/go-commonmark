@@ -1843,11 +1843,11 @@ func parseHardLineBreakSpace(remaining []byte) (end int, isHardLineBreak bool) {
 
 // An inlineByteReader transforms inline nodes into a text stream.
 type inlineByteReader struct {
-	source    []byte
-	spans     []*Inline
-	pos       int
-	indentPos int
-	prevPos   int
+	source     []byte
+	spans      []*Inline
+	pos        int
+	virtualPos int // indent or null replacement
+	prevPos    int
 }
 
 func newInlineByteReader(source []byte, spans []*Inline, pos int) *inlineByteReader {
@@ -1859,12 +1859,17 @@ func newInlineByteReader(source []byte, spans []*Inline, pos int) *inlineByteRea
 	}
 }
 
+// current returns the byte at the reader's position
+// or zero if the reader has reached the end of input.
 func (r *inlineByteReader) current() byte {
 	if r.pos >= len(r.source) {
 		return 0
 	}
 	if r.currentNode().Kind() == IndentKind {
 		return ' '
+	}
+	if r.source[r.pos] == 0 {
+		return nullReplacementString[r.virtualPos]
 	}
 	return r.source[r.pos]
 }
@@ -1894,12 +1899,15 @@ func (r *inlineByteReader) next() bool {
 	}
 
 	// Advance within node if possible.
-	if node.Kind() == IndentKind && r.indentPos < node.IndentWidth() {
+	if node.Kind() == IndentKind && r.virtualPos < node.IndentWidth() {
 		r.prevPos = r.pos
-		r.indentPos++
+		r.virtualPos++
 		return true
 	}
 	if node.Kind() != IndentKind && r.pos+1 < node.Span().End {
+		if r.source[r.pos] == 0 && r.source[r.pos+1] == 0 {
+			r.virtualPos = (r.virtualPos + 1) % len(nullReplacementString)
+		}
 		r.prevPos = r.pos
 		r.pos++
 		return true
@@ -1911,7 +1919,7 @@ func (r *inlineByteReader) next() bool {
 		if k := r.spans[0].Kind(); k == UnparsedKind || k == TextKind || k == IndentKind {
 			r.prevPos = r.pos
 			r.pos = r.spans[0].Span().Start
-			r.indentPos = 0
+			r.virtualPos = computeNullVirtualPosition(r.source, r.pos)
 			return true
 		}
 	}
@@ -1921,6 +1929,17 @@ func (r *inlineByteReader) next() bool {
 	r.pos++
 	r.spans = nil
 	return false
+}
+
+func computeNullVirtualPosition(source []byte, pos int) int {
+	if pos >= len(source) || source[pos] != 0 {
+		return 0
+	}
+	start := pos
+	for start > 0 && source[start-1] == 0 {
+		start--
+	}
+	return (pos - start) % len(nullReplacementString)
 }
 
 func (r *inlineByteReader) jumped() bool {
