@@ -669,6 +669,10 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 	if start+1 < state.spanEnd() && state.source[start+1] == '(' {
 		if info := p.parseInlineLink(state, start+1); info.span.IsValid() {
 			linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
+			linkNode.span = Span{
+				Start: state.stack[openDelimIndex].node.span.Start,
+				End:   info.span.End,
+			}
 			if info.destination.span.IsValid() {
 				destNode := &Inline{
 					kind: LinkDestinationKind,
@@ -718,6 +722,10 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 		}
 
 		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
+		linkNode.span = Span{
+			Start: state.stack[openDelimIndex].node.span.Start,
+			End:   start + 3,
+		}
 		linkNode.ref = normalizedLabel
 		linkNode.span.End = start + 3
 		p.finishLink(state, kind, openDelimIndex)
@@ -760,7 +768,10 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 
 		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
 		linkNode.children = append(linkNode.children, inlineLabel)
-		linkNode.span.End = label.span.End
+		linkNode.span = Span{
+			Start: state.stack[openDelimIndex].node.span.Start,
+			End:   label.span.End,
+		}
 		p.finishLink(state, kind, openDelimIndex)
 		return linkNode.span.End
 	default:
@@ -785,7 +796,10 @@ func (p *InlineParser) parseEndBracket(state *inlineState, start int) (end int) 
 
 		linkNode := state.wrap(kind, state.stack[openDelimIndex].node, nil)
 		linkNode.ref = normalizedLabel
-		linkNode.span.End = start + 1
+		linkNode.span = Span{
+			Start: state.stack[openDelimIndex].node.span.Start,
+			End:   start + 1,
+		}
 		p.finishLink(state, kind, openDelimIndex)
 		return linkNode.span.End
 	}
