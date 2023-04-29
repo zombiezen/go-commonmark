@@ -79,6 +79,8 @@ type Block struct {
 	lastLineBlank bool
 }
 
+// Kind returns the type of block node
+// or zero if the node is nil.
 func (b *Block) Kind() BlockKind {
 	if b == nil {
 		return 0
@@ -86,6 +88,7 @@ func (b *Block) Kind() BlockKind {
 	return b.kind
 }
 
+// Span returns the position information relative to [RootBlock.Source].
 func (b *Block) Span() Span {
 	if b == nil {
 		return NullSpan()
@@ -93,6 +96,8 @@ func (b *Block) Span() Span {
 	return b.span
 }
 
+// ChildCount returns the number of children the node has.
+// Calling ChildCount on nil returns 0.
 func (b *Block) ChildCount() int {
 	switch {
 	case b == nil:
@@ -104,6 +109,7 @@ func (b *Block) ChildCount() int {
 	}
 }
 
+// Child returns the i'th child of the node.
 func (b *Block) Child(i int) Node {
 	if len(b.blockChildren) > 0 {
 		return b.blockChildren[i].AsNode()
@@ -112,6 +118,8 @@ func (b *Block) Child(i int) Node {
 	}
 }
 
+// HeadingLevel returns the 1-based level for an [ATXHeadingKind] or [SetextHeadingKind],
+// or zero otherwise.
 func (b *Block) HeadingLevel() int {
 	switch b.Kind() {
 	case ATXHeadingKind, SetextHeadingKind:
@@ -198,15 +206,25 @@ func (b *Block) close(source []byte, parent *Block, end int) {
 	}
 }
 
+// BlockKind is an enumeration of values returned by [*Block.Kind].
 type BlockKind uint16
 
 const (
+	// ParagraphKind is used for a block of text.
 	ParagraphKind BlockKind = 1 + iota
+	// ThematicBreakKind is used for a thematic break, also known as a horizontal rule.
+	// It will not contain children.
 	ThematicBreakKind
+	// ATXHeadingKind is used for headings that start with hash marks.
 	ATXHeadingKind
+	// SetextHeadingKind is used for headings that end with a divider.
 	SetextHeadingKind
+	// IndentedCodeBlockKind is used for code blocks started by indentation.
 	IndentedCodeBlockKind
+	// FencedCodeBlockKind is used for code blocks started by backticks or tildes.
 	FencedCodeBlockKind
+	// HTMLBlockKind is used for blocks of raw HTML.
+	// It should not be wrapped by any tags in rendered HTML output.
 	HTMLBlockKind
 	// LinkReferenceDefinitionKind is used for a [link reference definition].
 	// The first child is always a [LinkLabelKind],
@@ -215,9 +233,17 @@ const (
 	//
 	// [link reference definition]: https://spec.commonmark.org/0.30/#link-reference-definition
 	LinkReferenceDefinitionKind
+	// BlockQuoteKind is used for block quotes.
 	BlockQuoteKind
+	// ListItemKind is used for items in an ordered or unordered list.
+	// The first child will always be of [ListMarkerKind].
+	// If the item contains a paragraph and the item is "tight",
+	// then the paragraph tag should be stripped.
 	ListItemKind
+	// ListKind is used for ordered or unordered lists.
 	ListKind
+	// ListMarkerKind is used to contain the marker in a [ListItemKind] node.
+	// It is typically not rendered directly.
 	ListMarkerKind
 
 	documentKind

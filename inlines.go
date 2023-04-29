@@ -187,23 +187,53 @@ func (inline *Inline) Child(i int) *Inline {
 type InlineKind uint16
 
 const (
+	// TextKind is used for literal text.
 	TextKind InlineKind = 1 + iota
+	// SoftLineBreakKind is rendered as either a space or as a hard line break,
+	// depending on the renderer.
 	SoftLineBreakKind
+	// HardLineBreakKind is rendered as a line break.
 	HardLineBreakKind
+	// IndentKind represents one or more space characters
+	// (the exact number can be retrieved by [*Inline.IndentWidth]).
+	// It's placed in the parse tree
+	// in situations where the number of logical spaces does not match the source.
 	IndentKind
 	// CharacterReferenceKind is used for ampersand escape characters
 	// (e.g. "&amp;").
 	CharacterReferenceKind
+	// InfoStringKind is used for the [info string] of a fenced code block.
+	// It's typically not rendered directly and its contents are implementation-defined.
+	//
+	// [info string]: https://spec.commonmark.org/0.30/#info-string
 	InfoStringKind
+	// EmphasisKind is used for text that has stress emphasis.
 	EmphasisKind
+	// StrongKind is used for text that has strong emphasis.
 	StrongKind
+	// LinkKind is used for hyperlinks.
+	// The [*Inline.LinkDestination], [*Inline.LinkTitle], and [*Inline.LinkReference] methods
+	// can be used to retrieve specific parts of the link.
 	LinkKind
+	// ImageKind is used for images.
+	// The contents of the node are used as the image's text description.
+	// Otherwise, ImageKind is similar to [LinkKind].
 	ImageKind
+	// LinkDestinationKind is used as part of links and images
+	// to indicate the destination or image source, respectively.
 	LinkDestinationKind
+	// LinkTitleKind is used as part of links and images
+	// to hold advisory text typically rendered as a tooltip.
 	LinkTitleKind
+	// LinkLabelKind is used as either a link reference definition label
+	// or in a link or image to reference a link reference definition.
 	LinkLabelKind
-
+	// CodeSpanKind is used for inline code in a non-code-block context.
 	CodeSpanKind
+	// AutolinkKind is used for [autolinks].
+	// The node's content is also the link's destination.
+	//
+	// [autolinks]: https://spec.commonmark.org/0.30/#autolinks
 	AutolinkKind
 
 	// HTMLTagKind is a container for one or more [RawHTMLKind] nodes
