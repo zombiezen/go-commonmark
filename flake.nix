@@ -20,7 +20,8 @@
       devShells.default = pkgs.mkShell {
         packages = [
           pkgs.cmark
-          pkgs.go-tools
+          pkgs.gotools # stringer, etc.
+          pkgs.go-tools # staticcheck
           pkgs.go_1_20
           pkgs.node2nix
           self.packages.${system}.commonmark-js

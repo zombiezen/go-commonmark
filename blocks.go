@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:generate stringer -type=BlockKind,InlineKind -output=kind_string.go
+
 package commonmark
 
 import (
