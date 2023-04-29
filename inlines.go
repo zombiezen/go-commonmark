@@ -1348,10 +1348,11 @@ func (p *InlineParser) parseCodeSpan(state *inlineState, start int) codeSpan {
 	r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], start)
 	for r.current() == '`' {
 		backtickLength++
-		if !r.next() {
+		ok := r.next()
+		result.content.Start = r.pos
+		if !ok {
 			return result
 		}
-		result.content.Start = r.pos
 	}
 
 	for {
