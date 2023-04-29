@@ -314,11 +314,16 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 			if !state.ignoreNextIndent {
 				dummy.children = append(dummy.children, state.unparsed[state.unparsedPos])
 			}
-			state.ignoreNextIndent = false
 		case UnparsedKind:
+			pos := state.unparsed[state.unparsedPos].Span().Start
+			if state.ignoreNextIndent {
+				for pos < state.spanEnd() && (source[pos] == ' ' || source[pos] == '\t') {
+					pos++
+				}
+			}
 			state.ignoreNextIndent = false
-			plainStart := state.unparsed[state.unparsedPos].Span().Start
-			for pos := plainStart; state.unparsedPos < len(state.unparsed) && pos < state.spanEnd(); {
+			plainStart := pos
+			for state.unparsedPos < len(state.unparsed) && pos < state.spanEnd() {
 				switch source[pos] {
 				case '*', '_':
 					state.addToRoot(&Inline{

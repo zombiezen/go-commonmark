@@ -281,7 +281,7 @@ func addLineText(p *lineParser) {
 	}
 
 	switch k := p.ContainerKind(); {
-	case blockRules[k].acceptsLines && k.IsCode():
+	case blockRules[k].acceptsLines:
 		if p.i < len(p.line) && p.line[p.i] == '\t' && p.tabRemaining > 0 && p.tabRemaining < tabStopSize {
 			p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
 				kind:   IndentKind,
@@ -292,19 +292,6 @@ func addLineText(p *lineParser) {
 				},
 			})
 			p.ConsumeIndent(int(p.tabRemaining))
-		}
-	case blockRules[k].acceptsLines && !k.IsCode():
-		if indent := p.Indent(); indent > 0 {
-			start := p.lineStart + p.i
-			p.ConsumeIndent(indent)
-			p.container.inlineChildren = append(p.container.inlineChildren, &Inline{
-				kind:   IndentKind,
-				indent: indent,
-				span: Span{
-					Start: start,
-					End:   p.lineStart + p.i,
-				},
-			})
 		}
 	case !isBlank:
 		// Create paragraph container for line.
