@@ -17,8 +17,11 @@
 package commonmark
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -80,6 +83,39 @@ func TestInsecureCharacters(t *testing.T) {
 			}
 		})
 	}
+}
+
+func BenchmarkParse(b *testing.B) {
+	b.Run("Spec", func(b *testing.B) {
+		input := new(bytes.Buffer)
+		testsuite := loadTestSuite(b)
+		for i, test := range testsuite {
+			if i > 0 {
+				input.WriteString("\n\n")
+			}
+			input.WriteString(test.Markdown)
+		}
+		b.ResetTimer()
+		b.SetBytes(int64(input.Len()))
+		b.ReportMetric(float64(len(testsuite)), "examples/op")
+
+		for i := 0; i < b.N; i++ {
+			Parse(input.Bytes())
+		}
+	})
+
+	b.Run("Goldmark", func(b *testing.B) {
+		input, err := os.ReadFile(filepath.Join("testdata", "goldmark_bench.md"))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.ResetTimer()
+		b.SetBytes(int64(len(input)))
+
+		for i := 0; i < b.N; i++ {
+			Parse(input)
+		}
+	})
 }
 
 func FuzzBlockParsing(f *testing.F) {
