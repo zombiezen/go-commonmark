@@ -43,7 +43,7 @@ func (inline *Inline) Kind() InlineKind {
 	return InlineKind(inline.kind)
 }
 
-// Span returns the position information relative to [RootBlock.Source].
+// Span returns the position information relative to the [RootBlock]'s Source field.
 func (inline *Inline) Span() Span {
 	if inline == nil {
 		return NullSpan()

@@ -88,7 +88,7 @@ func (b *Block) Kind() BlockKind {
 	return b.kind
 }
 
-// Span returns the position information relative to [RootBlock.Source].
+// Span returns the position information relative to the [RootBlock]'s Source field.
 func (b *Block) Span() Span {
 	if b == nil {
 		return NullSpan()
@@ -136,7 +136,7 @@ func (b *Block) IsOrderedList() bool {
 }
 
 // IsTightList reports whether the block is
-// an tight list or a tight list item.
+// a tight list or a tight list item.
 func (b *Block) IsTightList() bool {
 	return b != nil && !b.listLoose
 }

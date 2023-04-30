@@ -547,8 +547,8 @@ func indentLength(line []byte) int {
 	return len(line)
 }
 
-// Span is a contiguous region of a document
-// reference in a [RootBlock].
+// A Span describes a slice of a [RootBlock]'s Source field.
+// The zero value is an valid, empty span that starts at zero.
 type Span struct {
 	// Start is the index of the first byte of the span,
 	// relative to the beginning of the [RootBlock].
