@@ -174,7 +174,7 @@ var whitespaceRE = regexp.MustCompile(`\s+`)
 
 var htmlEscaper = bytereplacer.New(
 	"&", "&amp;",
-	`'`, "&#39;", // "&#39;" is shorter than "&apos;" and apos was not in HTML until HTML5.
+	`'`, "&apos;",
 	`<`, "&lt;",
 	`>`, "&gt;",
 	`"`, "&quot;",

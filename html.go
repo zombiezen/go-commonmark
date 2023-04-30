@@ -125,10 +125,10 @@ func appendChildrenHTML(dst []byte, source []byte, refMap ReferenceMap, parent *
 
 func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *Inline) []byte {
 	switch inline.Kind() {
-	case TextKind, UnparsedKind, CharacterReferenceKind:
-		dst = append(dst, html.EscapeString(inline.Text(source))...)
-	case RawHTMLKind:
-		dst = append(dst, inline.Text(source)...)
+	case TextKind, UnparsedKind:
+		dst = escapeHTML(dst, spanSlice(source, inline.Span()))
+	case CharacterReferenceKind, RawHTMLKind:
+		dst = append(dst, spanSlice(source, inline.Span())...)
 	case SoftLineBreakKind:
 		dst = append(dst, '\n')
 	case HardLineBreakKind:
@@ -251,6 +251,40 @@ func appendAltText(dst []byte, source []byte, parent *Inline) []byte {
 		dst = append(dst, `alt="`...)
 	}
 	dst = append(dst, `"`...)
+	return dst
+}
+
+// escapeHTML appends the HTML-escaped version of a byte slice to another byte slice.
+func escapeHTML(dst []byte, src []byte) []byte {
+	verbatimStart := 0
+	for i, b := range src {
+		switch b {
+		case '&':
+			dst = append(dst, src[verbatimStart:i]...)
+			dst = append(dst, "&amp;"...)
+			verbatimStart = i + 1
+		case '\'':
+			dst = append(dst, src[verbatimStart:i]...)
+			// "&#39;" is shorter than "&apos;" and apos was not in HTML until HTML5.
+			dst = append(dst, "&#39;"...)
+			verbatimStart = i + 1
+		case '<':
+			dst = append(dst, src[verbatimStart:i]...)
+			dst = append(dst, "&lt;"...)
+			verbatimStart = i + 1
+		case '>':
+			dst = append(dst, src[verbatimStart:i]...)
+			dst = append(dst, "&gt;"...)
+			verbatimStart = i + 1
+		case '"':
+			dst = append(dst, src[verbatimStart:i]...)
+			dst = append(dst, "&quot;"...)
+			verbatimStart = i + 1
+		}
+	}
+	if verbatimStart < len(src) {
+		dst = append(dst, src[verbatimStart:]...)
+	}
 	return dst
 }
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning][].
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 [Unreleased]: https://github.com/zombiezen/go-commonmark/compare/v0.2.0...HEAD
 
+## [Unreleased][]
+
+### Fixed
+
+- HTML rendering now performs significantly less allocations.
+
 ## [0.2.0][] - 2023-04-30
 
 Version 0.2 includes more documentation, adds some small features,
