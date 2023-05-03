@@ -16,6 +16,7 @@
     in
     {
       packages.commonmark-js = (pkgs.callPackage ./nix/commonmark.js {})."commonmark-0.30.0";
+      packages.gfm-spec-json = pkgs.callPackage ./nix/gfm-spec-json.nix {};
 
       devShells.default = pkgs.mkShell {
         packages = [

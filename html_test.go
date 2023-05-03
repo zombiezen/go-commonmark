@@ -54,6 +54,34 @@ func TestSpec(t *testing.T) {
 	}
 }
 
+func TestGFMSpec(t *testing.T) {
+	t.Skip("GitHub Flavored Markdown not supported")
+
+	data, err := os.ReadFile(filepath.Join("testdata", "spec-0.29.0.gfm.11.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var testsuite []specExample
+	if err := json.Unmarshal(data, &testsuite); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range testsuite {
+		t.Run(fmt.Sprintf("Example%d", test.Example), func(t *testing.T) {
+			blocks, refMap := Parse([]byte(test.Markdown))
+			buf := new(bytes.Buffer)
+			if err := RenderHTML(buf, blocks, refMap); err != nil {
+				t.Error("RenderHTML:", err)
+			}
+			got := string(normalizeHTML(buf.Bytes()))
+			want := string(normalizeHTML([]byte(test.HTML)))
+			if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Input:\n%s\nOutput (-want +got):\n%s", test.Markdown, diff)
+			}
+		})
+	}
+}
+
 func BenchmarkRenderHTML(b *testing.B) {
 	b.Run("Spec", func(b *testing.B) {
 		input := new(bytes.Buffer)
