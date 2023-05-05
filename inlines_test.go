@@ -76,8 +76,8 @@ func TestEmphasisSpan(t *testing.T) {
 func TestLinkSpan(t *testing.T) {
 	const (
 		prefix          = "oh "
-		paragraphSuffix = " world\n"
-		finalSuffix     = "\n[hello]: /foo"
+		paragraphSuffix = " world"
+		finalSuffix     = "\n\n[hello]: /foo"
 	)
 
 	tests := []struct {

@@ -67,7 +67,12 @@ func (inline *Inline) Text(source []byte) string {
 		return string(spanSlice(source, inline.Span()))
 	case CharacterReferenceKind:
 		return html.UnescapeString(string(spanSlice(source, inline.Span())))
-	case SoftLineBreakKind, HardLineBreakKind:
+	case SoftLineBreakKind:
+		if inline.Span().Len() == 0 {
+			return "\n"
+		}
+		return string(spanSlice(source, inline.Span()))
+	case HardLineBreakKind:
 		return "\n"
 	case IndentKind:
 		sb := new(strings.Builder)
@@ -465,7 +470,6 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 					r := newInlineByteReader(state.source, state.unparsed[state.unparsedPos:], pos)
 					span := parseHTMLTag(r)
 					if !span.IsValid() {
-						// TODO(soon): Autolinks.
 						pos++
 						continue
 					}
@@ -522,6 +526,60 @@ func (p *InlineParser) parse(source []byte, container *Block) []*Inline {
 						},
 					})
 					pos += end
+					plainStart = pos
+				case '\n':
+					// Hard line breaks already filtered out by other branches.
+					state.addToRoot(&Inline{
+						kind: TextKind,
+						span: Span{
+							Start: plainStart,
+							End:   pos,
+						},
+					})
+					if !state.isLastSpan() {
+						state.addToRoot(&Inline{
+							kind: SoftLineBreakKind,
+							span: Span{
+								Start: pos,
+								End:   pos + 1,
+							},
+						})
+					}
+					pos++
+					plainStart = pos
+				case '\r':
+					// Hard line breaks already filtered out by other branches.
+					state.addToRoot(&Inline{
+						kind: TextKind,
+						span: Span{
+							Start: plainStart,
+							End:   pos,
+						},
+					})
+					if pos+1 < state.spanEnd() && state.source[pos+1] == '\n' {
+						// CRLF.
+						if !state.isLastSpan() {
+							state.addToRoot(&Inline{
+								kind: SoftLineBreakKind,
+								span: Span{
+									Start: pos,
+									End:   pos + 2,
+								},
+							})
+						}
+						pos += 2
+					} else {
+						if !state.isLastSpan() {
+							state.addToRoot(&Inline{
+								kind: SoftLineBreakKind,
+								span: Span{
+									Start: pos,
+									End:   pos + 1,
+								},
+							})
+						}
+						pos++
+					}
 					plainStart = pos
 				default:
 					pos++

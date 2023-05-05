@@ -82,6 +82,56 @@ func TestGFMSpec(t *testing.T) {
 	}
 }
 
+func TestSoftBreakBehavior(t *testing.T) {
+	tests := []struct {
+		name     string
+		behavior SoftBreakBehavior
+		input    string
+		want     string
+	}{
+		{
+			name:     "PreserveLF",
+			behavior: SoftBreakPreserve,
+			input:    "Hello\nWorld!",
+			want:     "<p>Hello\nWorld!</p>",
+		},
+		{
+			name:     "PreserveCRLF",
+			behavior: SoftBreakPreserve,
+			input:    "Hello\r\nWorld!",
+			want:     "<p>Hello\r\nWorld!</p>",
+		},
+		{
+			name:     "Space",
+			behavior: SoftBreakSpace,
+			input:    "Hello\r\nWorld!",
+			want:     "<p>Hello World!</p>",
+		},
+		{
+			name:     "Harden",
+			behavior: SoftBreakHarden,
+			input:    "Hello\r\nWorld!",
+			want:     "<p>Hello<br>\nWorld!</p>",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			blocks, refMap := Parse([]byte(test.input))
+			r := &HTMLRenderer{
+				ReferenceMap:      refMap,
+				SoftBreakBehavior: test.behavior,
+			}
+			buf := new(bytes.Buffer)
+			if err := r.Render(buf, blocks); err != nil {
+				t.Error("Render:", err)
+			}
+			if got := buf.String(); got != test.want {
+				t.Errorf("output = %q; want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func BenchmarkRenderHTML(b *testing.B) {
 	b.Run("Spec", func(b *testing.B) {
 		input := new(bytes.Buffer)

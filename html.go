@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:generate stringer -type=SoftBreakBehavior -output=html_string.go
+
 package commonmark
 
 import (
@@ -25,17 +27,33 @@ import (
 	"unicode/utf8"
 )
 
+// An HTMLRenderer converts fully parsed CommonMark blocks into HTML.
+type HTMLRenderer struct {
+	// ReferenceMap holds the document's link reference definitions.
+	ReferenceMap ReferenceMap
+	// SoftBreakBehavior determines how soft line breaks are rendered.
+	SoftBreakBehavior SoftBreakBehavior
+}
+
 // RenderHTML writes the given sequence of parsed blocks
-// to the given writer as HTML.
+// to the given writer as HTML
+// using the default options for [HTMLRenderer].
 // It will return the first error encountered, if any.
 func RenderHTML(w io.Writer, blocks []*RootBlock, refMap ReferenceMap) error {
+	return (&HTMLRenderer{ReferenceMap: refMap}).Render(w, blocks)
+}
+
+// Render writes the given sequence of parsed blocks
+// to the given writer as HTML.
+// It will return the first error encountered, if any.
+func (r *HTMLRenderer) Render(w io.Writer, blocks []*RootBlock) error {
 	var buf []byte
 	for i, b := range blocks {
 		buf = buf[:0]
 		if i > 0 {
 			buf = append(buf, "\n\n"...)
 		}
-		buf = appendHTML(buf, b.Source, refMap, &b.Block)
+		buf = r.AppendBlock(buf, b)
 		if _, err := w.Write(buf); err != nil {
 			return fmt.Errorf("render markdown to html: %w", err)
 		}
@@ -43,11 +61,17 @@ func RenderHTML(w io.Writer, blocks []*RootBlock, refMap ReferenceMap) error {
 	return nil
 }
 
-func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []byte {
+// AppendBlock appends the rendered HTML of a fully parsed block to dst
+// and returns the resulting byte slice.
+func (r *HTMLRenderer) AppendBlock(dst []byte, block *RootBlock) []byte {
+	return r.appendBlock(dst, block.Source, &block.Block)
+}
+
+func (r *HTMLRenderer) appendBlock(dst []byte, source []byte, block *Block) []byte {
 	switch block.Kind() {
 	case ParagraphKind:
 		dst = append(dst, "<p>"...)
-		dst = appendChildrenHTML(dst, source, refMap, block, false)
+		dst = r.appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</p>"...)
 	case ThematicBreakKind:
 		dst = append(dst, "<hr>"...)
@@ -56,7 +80,7 @@ func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []
 		dst = append(dst, "<h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
-		dst = appendChildrenHTML(dst, source, refMap, block, false)
+		dst = r.appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</h"...)
 		dst = strconv.AppendInt(dst, int64(level), 10)
 		dst = append(dst, ">"...)
@@ -71,11 +95,11 @@ func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []
 			}
 		}
 		dst = append(dst, ">"...)
-		dst = appendChildrenHTML(dst, source, refMap, block, false)
+		dst = r.appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</code></pre>"...)
 	case BlockQuoteKind:
 		dst = append(dst, "<blockquote>"...)
-		dst = appendChildrenHTML(dst, source, refMap, block, false)
+		dst = r.appendChildrenHTML(dst, source, block, false)
 		dst = append(dst, "</blockquote>"...)
 	case ListKind:
 		if block.IsOrderedList() {
@@ -89,7 +113,7 @@ func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []
 		} else {
 			dst = append(dst, "<ul>"...)
 		}
-		dst = appendChildrenHTML(dst, source, refMap, block, false)
+		dst = r.appendChildrenHTML(dst, source, block, false)
 		if block.IsOrderedList() {
 			dst = append(dst, "</ol>"...)
 		} else {
@@ -97,64 +121,76 @@ func appendHTML(dst []byte, source []byte, refMap ReferenceMap, block *Block) []
 		}
 	case ListItemKind:
 		dst = append(dst, "<li>"...)
-		dst = appendChildrenHTML(dst, source, refMap, block, block.IsTightList())
+		dst = r.appendChildrenHTML(dst, source, block, block.IsTightList())
 		dst = append(dst, "</li>"...)
 	case HTMLBlockKind:
-		dst = appendChildrenHTML(dst, source, refMap, block, false)
+		dst = r.appendChildrenHTML(dst, source, block, false)
 	}
 	return dst
 }
 
-func appendChildrenHTML(dst []byte, source []byte, refMap ReferenceMap, parent *Block, tight bool) []byte {
+func (r *HTMLRenderer) appendChildrenHTML(dst []byte, source []byte, parent *Block, tight bool) []byte {
 	switch {
 	case parent != nil && len(parent.inlineChildren) > 0:
 		for _, c := range parent.inlineChildren {
-			dst = appendInlineHTML(dst, source, refMap, c)
+			dst = r.appendInlineHTML(dst, source, c)
 		}
 	case parent != nil && len(parent.blockChildren) > 0:
 		for _, c := range parent.blockChildren {
 			if tight && c.Kind() == ParagraphKind {
-				dst = appendChildrenHTML(dst, source, refMap, c, false)
+				dst = r.appendChildrenHTML(dst, source, c, false)
 			} else {
-				dst = appendHTML(dst, source, refMap, c)
+				dst = r.appendBlock(dst, source, c)
 			}
 		}
 	}
 	return dst
 }
 
-func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *Inline) []byte {
+func (r *HTMLRenderer) appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
+	const hardLineBreak = "<br>\n"
 	switch inline.Kind() {
 	case TextKind, UnparsedKind:
 		dst = escapeHTML(dst, spanSlice(source, inline.Span()))
 	case CharacterReferenceKind, RawHTMLKind:
 		dst = append(dst, spanSlice(source, inline.Span())...)
 	case SoftLineBreakKind:
-		dst = append(dst, '\n')
+		switch r.SoftBreakBehavior {
+		case SoftBreakHarden:
+			dst = append(dst, hardLineBreak...)
+		case SoftBreakSpace:
+			dst = append(dst, ' ')
+		default:
+			if inline.Span().Len() > 0 {
+				dst = append(dst, spanSlice(source, inline.Span())...)
+			} else {
+				dst = append(dst, '\n')
+			}
+		}
 	case HardLineBreakKind:
-		dst = append(dst, "<br>\n"...)
+		dst = append(dst, hardLineBreak...)
 	case EmphasisKind:
 		dst = append(dst, "<em>"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, refMap, c)
+			dst = r.appendInlineHTML(dst, source, c)
 		}
 		dst = append(dst, "</em>"...)
 	case StrongKind:
 		dst = append(dst, "<strong>"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, refMap, c)
+			dst = r.appendInlineHTML(dst, source, c)
 		}
 		dst = append(dst, "</strong>"...)
 	case CodeSpanKind:
 		dst = append(dst, "<code>"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, refMap, c)
+			dst = r.appendInlineHTML(dst, source, c)
 		}
 		dst = append(dst, "</code>"...)
 	case LinkKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
-			def = refMap[ref]
+			def = r.ReferenceMap[ref]
 		} else {
 			title := inline.LinkTitle()
 			def = LinkDefinition{
@@ -173,13 +209,13 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 		}
 		dst = append(dst, ">"...)
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, refMap, c)
+			dst = r.appendInlineHTML(dst, source, c)
 		}
 		dst = append(dst, "</a>"...)
 	case ImageKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
-			def = refMap[ref]
+			def = r.ReferenceMap[ref]
 		} else {
 			title := inline.LinkTitle()
 			def = LinkDefinition{
@@ -214,7 +250,7 @@ func appendInlineHTML(dst []byte, source []byte, refMap ReferenceMap, inline *In
 		}
 	case HTMLTagKind:
 		for _, c := range inline.children {
-			dst = appendInlineHTML(dst, source, refMap, c)
+			dst = r.appendInlineHTML(dst, source, c)
 		}
 	}
 	return dst
@@ -287,6 +323,20 @@ func escapeHTML(dst []byte, src []byte) []byte {
 	}
 	return dst
 }
+
+// SoftBreakBehavior is an enumeration of rendering styles for [soft line breaks].
+//
+// [soft line breaks]: https://spec.commonmark.org/0.30/#soft-line-breaks
+type SoftBreakBehavior int
+
+const (
+	// SoftBreakPreserve indicates that a soft line break should be rendered as-is.
+	SoftBreakPreserve SoftBreakBehavior = iota
+	// SoftBreakSpace indicates that a soft line break should be rendered as a space.
+	SoftBreakSpace
+	// SoftBreakHarden indicates that a soft line break should be rendered as a hard line break.
+	SoftBreakHarden
+)
 
 // NormalizeURI percent-encodes any characters in a string
 // that are not reserved or unreserved URI characters.

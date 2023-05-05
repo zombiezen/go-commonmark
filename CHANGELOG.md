@@ -9,9 +9,18 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased][]
 
+### Added
+
+- HTML rendering can be customized with the new `HTMLRenderer` type.
+  ([#2](https://github.com/zombiezen/go-commonmark/issues/2))
+
+
 ### Fixed
 
 - HTML rendering now performs significantly less allocations.
+- Soft line breaks are now being emitted correctly.
+  They previously were being emitted as part of the text
+  except in specific conditions of code blocks.
 
 ## [0.2.0][] - 2023-04-30
 

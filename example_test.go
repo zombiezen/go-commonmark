@@ -30,8 +30,7 @@ func Example() {
 	// Render parse tree to HTML.
 	commonmark.RenderHTML(os.Stdout, blocks, refMap)
 	// Output:
-	// <p>Hello, <strong>World</strong>!
-	// </p>
+	// <p>Hello, <strong>World</strong>!</p>
 }
 
 func ExampleBlockParser() {
@@ -73,6 +72,5 @@ func ExampleBlockParser() {
 	// Render blocks as HTML.
 	commonmark.RenderHTML(os.Stdout, blocks, refMap)
 	// Output:
-	// <p>Hello, <a href="https://www.example.com/">World</a>!
-	// </p>
+	// <p>Hello, <a href="https://www.example.com/">World</a>!</p>
 }
