@@ -264,7 +264,7 @@ func normalizeHTML(b []byte) []byte {
 		value string
 	}
 
-	tok := html.NewTokenizer(bytes.NewReader(b))
+	tok := html.NewTokenizerFragment(bytes.NewReader(b), "div")
 	var output []byte
 	last := html.StartTagToken
 	var lastTag string
