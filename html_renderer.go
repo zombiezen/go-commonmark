@@ -19,12 +19,15 @@
 package commonmark
 
 import (
+	"bytes"
 	"fmt"
 	"html"
 	"io"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/net/html/atom"
 )
 
 // An HTMLRenderer converts fully parsed CommonMark blocks into HTML.
@@ -46,7 +49,6 @@ import (
 //     which may be surprising to end-users for legitimate use cases.
 //   - FilterTag can be used to prevent some tags from being used
 //     while still showing the source text.
-//     The default FilterTag prevents common undesirable tags from being used.
 //     Note that this does not prevent parse errors.
 //     For untrusted inputs, this technique should be combined with sanitization.
 //
@@ -63,21 +65,11 @@ type HTMLRenderer struct {
 	// FilterTag is a predicate function
 	// that reports whether an element with the given lowercased tag name
 	// should have its leading angle bracket escaped.
-	// If FilterTag is nil, then a filter
-	// equivalent to the GitHub Flavored Markdown [tagfilter extension]
-	// will be used.
-	// It has no effect if IgnoreRaw is true.
+	// If FilterTag is nil, then no filtering will occur.
 	//
 	// FilterTag functions must not modify the byte slice
 	// nor retain the slice after the function returns.
-	//
-	// [tagfilter extension]: https://github.github.com/gfm/#disallowed-raw-html-extension-
 	FilterTag func(tag []byte) bool
-	// If SkipFilter is true, FilterTag will not be consulted
-	// and any raw HTML is passed through verbatim.
-	// This avoids the performance penalty of tokenizing the raw HTML.
-	// It has no effect if IgnoreRaw is true.
-	SkipFilter bool
 }
 
 // RenderHTML writes the given sequence of parsed blocks
@@ -119,28 +111,69 @@ func (r *HTMLRenderer) AppendBlock(dst []byte, block *RootBlock) []byte {
 
 type renderState struct {
 	*HTMLRenderer
-	dst []byte
+	dst      []byte
+	lowerBuf []byte
+}
+
+func (r *renderState) openTagAttr(name atom.Atom) {
+	start := len(r.dst)
+	r.dst = append(r.dst, '<')
+	r.dst = append(r.dst, name.String()...)
+	if r.FilterTag != nil && r.FilterTag(r.dst[start+1:]) {
+		r.dst = r.dst[:start]
+		r.dst = append(r.dst, "&lt;"...)
+		r.dst = append(r.dst, name.String()...)
+	}
+}
+
+func (r *renderState) openTag(name atom.Atom) {
+	r.openTagAttr(name)
+	r.dst = append(r.dst, '>')
+}
+
+func (r *renderState) closeTag(name atom.Atom) {
+	const prefix = "</"
+	start := len(r.dst)
+	r.dst = append(r.dst, "</"...)
+	r.dst = append(r.dst, name.String()...)
+	if r.FilterTag != nil && r.FilterTag(r.dst[start+1:]) {
+		r.dst = r.dst[:start]
+		r.dst = append(r.dst, "&lt;/"...)
+		r.dst = append(r.dst, name.String()...)
+	}
+	r.dst = append(r.dst, '>')
 }
 
 func (r *renderState) block(source []byte, block *Block) {
 	switch block.Kind() {
 	case ParagraphKind:
-		r.dst = append(r.dst, "<p>"...)
+		r.openTag(atom.P)
 		r.children(source, block, false)
-		r.dst = append(r.dst, "</p>"...)
+		r.closeTag(atom.P)
 	case ThematicBreakKind:
-		r.dst = append(r.dst, "<hr>"...)
+		r.openTag(atom.Hr)
 	case ATXHeadingKind, SetextHeadingKind:
-		level := block.HeadingLevel()
-		r.dst = append(r.dst, "<h"...)
-		r.dst = strconv.AppendInt(r.dst, int64(level), 10)
-		r.dst = append(r.dst, ">"...)
+		var tagName atom.Atom
+		switch block.HeadingLevel() {
+		case 1:
+			tagName = atom.H1
+		case 2:
+			tagName = atom.H2
+		case 3:
+			tagName = atom.H3
+		case 4:
+			tagName = atom.H4
+		case 5:
+			tagName = atom.H5
+		default:
+			tagName = atom.H6
+		}
+		r.openTag(tagName)
 		r.children(source, block, false)
-		r.dst = append(r.dst, "</h"...)
-		r.dst = strconv.AppendInt(r.dst, int64(level), 10)
-		r.dst = append(r.dst, ">"...)
+		r.closeTag(tagName)
 	case IndentedCodeBlockKind, FencedCodeBlockKind:
-		r.dst = append(r.dst, "<pre><code"...)
+		r.openTag(atom.Pre)
+		r.openTagAttr(atom.Code)
 		if info := block.InfoString(); info != nil {
 			words := strings.Fields(info.Text(source))
 			if len(words) > 0 {
@@ -151,14 +184,17 @@ func (r *renderState) block(source []byte, block *Block) {
 		}
 		r.dst = append(r.dst, ">"...)
 		r.children(source, block, false)
-		r.dst = append(r.dst, "</code></pre>"...)
+		r.closeTag(atom.Code)
+		r.closeTag(atom.Pre)
 	case BlockQuoteKind:
-		r.dst = append(r.dst, "<blockquote>"...)
+		r.openTag(atom.Blockquote)
 		r.children(source, block, false)
-		r.dst = append(r.dst, "</blockquote>"...)
+		r.closeTag(atom.Blockquote)
 	case ListKind:
+		var tagName atom.Atom
 		if block.IsOrderedList() {
-			r.dst = append(r.dst, "<ol"...)
+			tagName = atom.Ol
+			r.openTagAttr(tagName)
 			if n := block.firstChild().Block().ListItemNumber(source); n >= 0 && n != 1 {
 				r.dst = append(r.dst, ` start="`...)
 				r.dst = strconv.AppendInt(r.dst, int64(n), 10)
@@ -166,18 +202,15 @@ func (r *renderState) block(source []byte, block *Block) {
 			}
 			r.dst = append(r.dst, ">"...)
 		} else {
-			r.dst = append(r.dst, "<ul>"...)
+			tagName = atom.Ul
+			r.openTag(tagName)
 		}
 		r.children(source, block, false)
-		if block.IsOrderedList() {
-			r.dst = append(r.dst, "</ol>"...)
-		} else {
-			r.dst = append(r.dst, "</ul>"...)
-		}
+		r.closeTag(tagName)
 	case ListItemKind:
-		r.dst = append(r.dst, "<li>"...)
+		r.openTag(atom.Li)
 		r.children(source, block, block.IsTightList())
-		r.dst = append(r.dst, "</li>"...)
+		r.closeTag(atom.Li)
 	case HTMLBlockKind:
 		if !r.IgnoreRaw {
 			r.children(source, block, false)
@@ -211,8 +244,11 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 		r.dst = append(r.dst, spanSlice(source, inline.Span())...)
 	case RawHTMLKind:
 		if !r.IgnoreRaw {
-			// TODO(now): Filter if !r.SkipFilter
-			r.dst = append(r.dst, spanSlice(source, inline.Span())...)
+			if r.FilterTag == nil {
+				r.dst = append(r.dst, spanSlice(source, inline.Span())...)
+			} else {
+				r.filterRaw(spanSlice(source, inline.Span()))
+			}
 		}
 	case SoftLineBreakKind:
 		switch r.SoftBreakBehavior {
@@ -230,23 +266,23 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 	case HardLineBreakKind:
 		r.dst = append(r.dst, hardLineBreak...)
 	case EmphasisKind:
-		r.dst = append(r.dst, "<em>"...)
+		r.openTag(atom.Em)
 		for _, c := range inline.children {
 			r.inline(source, c)
 		}
-		r.dst = append(r.dst, "</em>"...)
+		r.closeTag(atom.Em)
 	case StrongKind:
-		r.dst = append(r.dst, "<strong>"...)
+		r.openTag(atom.Strong)
 		for _, c := range inline.children {
 			r.inline(source, c)
 		}
-		r.dst = append(r.dst, "</strong>"...)
+		r.closeTag(atom.Strong)
 	case CodeSpanKind:
-		r.dst = append(r.dst, "<code>"...)
+		r.openTag(atom.Code)
 		for _, c := range inline.children {
 			r.inline(source, c)
 		}
-		r.dst = append(r.dst, "</code>"...)
+		r.closeTag(atom.Code)
 	case LinkKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
@@ -259,7 +295,8 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 				TitlePresent: title != nil,
 			}
 		}
-		r.dst = append(r.dst, `<a href="`...)
+		r.openTagAttr(atom.A)
+		r.dst = append(r.dst, ` href="`...)
 		r.dst = append(r.dst, html.EscapeString(NormalizeURI(def.Destination))...)
 		r.dst = append(r.dst, `"`...)
 		if def.TitlePresent {
@@ -271,7 +308,7 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 		for _, c := range inline.children {
 			r.inline(source, c)
 		}
-		r.dst = append(r.dst, "</a>"...)
+		r.closeTag(atom.A)
 	case ImageKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
@@ -284,7 +321,8 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 				TitlePresent: title != nil,
 			}
 		}
-		r.dst = append(r.dst, `<img src="`...)
+		r.openTagAttr(atom.Img)
+		r.dst = append(r.dst, ` src="`...)
 		r.dst = append(r.dst, html.EscapeString(NormalizeURI(def.Destination))...)
 		r.dst = append(r.dst, `"`...)
 		if def.TitlePresent {
@@ -296,14 +334,15 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 		r.dst = append(r.dst, ">"...)
 	case AutolinkKind:
 		destination := inline.children[0].Text(source)
-		r.dst = append(r.dst, `<a href="`...)
+		r.openTagAttr(atom.A)
+		r.dst = append(r.dst, ` href="`...)
 		if IsEmailAddress(destination) {
 			r.dst = append(r.dst, "mailto:"...)
 		}
 		r.dst = append(r.dst, html.EscapeString(NormalizeURI(destination))...)
 		r.dst = append(r.dst, `">`...)
 		r.dst = append(r.dst, html.EscapeString(destination)...)
-		r.dst = append(r.dst, "</a>"...)
+		r.closeTag(atom.A)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			r.dst = append(r.dst, ' ')
@@ -313,6 +352,88 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 			r.inline(source, c)
 		}
 	}
+}
+
+// filterRaw performs the tag filtering
+// described in https://github.github.com/gfm/#disallowed-raw-html-extension-.
+//
+// It cannot use a conventional HTML parser,
+// since raw HTML in Markdown may be incomplete or start in the middle of a tag.
+func (r *renderState) filterRaw(rawHTML []byte) {
+	const (
+		copyState = iota
+		commentState
+		piState
+		declState
+		cdataState
+	)
+	state := copyState
+	copyStart := 0
+	for i := 0; i < len(rawHTML); {
+		switch state {
+		case copyState:
+			if rawHTML[i] == '<' {
+				switch {
+				case hasBytePrefix(rawHTML[i:], cdataPrefix):
+					state = cdataState
+					i += len(cdataPrefix)
+				case hasBytePrefix(rawHTML[i:], htmlCommentPrefix):
+					state = commentState
+					i += len(htmlCommentPrefix)
+				case hasHTMLDeclarationPrefix(rawHTML[i:]):
+					state = declState
+					i += len("<!x")
+				default:
+					tagNameStart := i + 1
+					tagEnd := len(rawHTML)
+					if j := bytes.IndexByte(rawHTML[tagNameStart:], '>'); j >= 0 {
+						tagEnd = tagNameStart + j + len(">")
+					}
+					tagNameEnd := tagNameStart + htmlTagNameEnd(rawHTML[tagNameStart:tagEnd])
+					tagName := maybeLower(rawHTML[tagNameStart:tagNameEnd], &r.lowerBuf)
+					if r.FilterTag(tagName) {
+						r.dst = append(r.dst, rawHTML[copyStart:i]...)
+						r.dst = append(r.dst, "&lt;"...)
+						r.dst = append(r.dst, rawHTML[tagNameStart:tagEnd]...)
+						copyStart = tagEnd
+					}
+					i = tagEnd
+				}
+			} else {
+				i++
+			}
+		case commentState:
+			if hasBytePrefix(rawHTML[i:], htmlCommentSuffix) {
+				state = copyState
+				i += len(htmlCommentSuffix)
+			} else {
+				i++
+			}
+		case piState:
+			if hasBytePrefix(rawHTML[i:], processingInstructionSuffix) {
+				state = copyState
+				i += len(processingInstructionSuffix)
+			} else {
+				i++
+			}
+		case declState:
+			if rawHTML[i] == '>' {
+				state = copyState
+			}
+			i++
+		case cdataState:
+			if hasBytePrefix(rawHTML[i:], cdataSuffix) {
+				state = copyState
+				i += len(cdataSuffix)
+			} else {
+				i++
+			}
+		default:
+			panic("unreachable")
+		}
+	}
+
+	r.dst = append(r.dst, rawHTML[copyStart:]...)
 }
 
 func appendAltText(dst []byte, source []byte, parent *Inline) []byte {
@@ -404,6 +525,24 @@ func maybeLower(x []byte, buf *[]byte) []byte {
 		}
 	}
 	return *buf
+}
+
+// FilterTagGFM performs the same tag filtering as the
+// GitHub Flavored Markdown [tagfilter extension].
+// It is suitable for use as the FilterTag field in [HTMLRenderer].
+//
+// [tagfilter extension]: https://github.github.com/gfm/#disallowed-raw-html-extension-
+func FilterTagGFM(tag []byte) bool {
+	tagAtom := atom.Lookup(tag)
+	return tagAtom == atom.Title ||
+		tagAtom == atom.Textarea ||
+		tagAtom == atom.Style ||
+		tagAtom == atom.Xmp ||
+		tagAtom == atom.Iframe ||
+		tagAtom == atom.Noembed ||
+		tagAtom == atom.Noframes ||
+		tagAtom == atom.Script ||
+		tagAtom == atom.Plaintext
 }
 
 // SoftBreakBehavior is an enumeration of rendering styles for [soft line breaks].

@@ -23,11 +23,6 @@ import (
 )
 
 func parseHTMLTag(r *inlineByteReader) Span {
-	const (
-		cdataPrefix = "[CDATA["
-		cdataSuffix = "]]>"
-	)
-
 	if r.current() != '<' {
 		return NullSpan()
 	}
@@ -100,9 +95,9 @@ func parseHTMLTag(r *inlineByteReader) Span {
 					return NullSpan()
 				}
 			}
-		case hasBytePrefix(rest, cdataPrefix):
+		case hasBytePrefix(rest, cdataPrefix[len("<!"):]):
 			// CDATA.
-			for i := 0; i < len(cdataPrefix); i++ {
+			for i := 0; i < len(cdataPrefix[len("<!"):]); i++ {
 				if !r.next() {
 					return NullSpan()
 				}
@@ -209,6 +204,18 @@ func parseHTMLTagName(r *inlineByteReader) bool {
 	return true
 }
 
+func htmlTagNameEnd(b []byte) int {
+	if len(b) == 0 || !isASCIILetter(b[0]) {
+		return 0
+	}
+	for i := 1; i < len(b); i++ {
+		if !isASCIILetter(b[i]) && !isASCIIDigit(b[i]) && b[i] != '-' {
+			return i
+		}
+	}
+	return len(b)
+}
+
 func parseHTMLAttribute(r *inlineByteReader) bool {
 	// Attribute name.
 	if c := r.current(); !isASCIILetter(c) && c != '_' && c != ':' {
@@ -276,6 +283,17 @@ func parseHTMLAttribute(r *inlineByteReader) bool {
 	}
 }
 
+const (
+	cdataPrefix = "<![CDATA["
+	cdataSuffix = "]]>"
+
+	htmlCommentPrefix = "<!--"
+	htmlCommentSuffix = "-->"
+
+	processingInstructionPrefix = "<?"
+	processingInstructionSuffix = "?>"
+)
+
 // htmlBlockConditions is the set of [HTML block] start and end conditions.
 //
 // [HTML block]: https://spec.commonmark.org/0.30/#html-blocks
@@ -308,26 +326,24 @@ var htmlBlockConditions = []struct {
 	},
 	{
 		startCondition: func(line []byte) bool {
-			return hasBytePrefix(line, "<!--")
+			return hasBytePrefix(line, htmlCommentPrefix)
 		},
 		endCondition: func(line []byte) bool {
-			return contains(line, "-->")
+			return contains(line, htmlCommentSuffix)
 		},
 		canInterruptParagraph: true,
 	},
 	{
 		startCondition: func(line []byte) bool {
-			return hasBytePrefix(line, "<?")
+			return hasBytePrefix(line, processingInstructionPrefix)
 		},
 		endCondition: func(line []byte) bool {
-			return contains(line, "?>")
+			return contains(line, processingInstructionSuffix)
 		},
 		canInterruptParagraph: true,
 	},
 	{
-		startCondition: func(line []byte) bool {
-			return hasBytePrefix(line, "<!") && len(line) >= 3 && isASCIILetter(line[2])
-		},
+		startCondition: hasHTMLDeclarationPrefix,
 		endCondition: func(line []byte) bool {
 			return contains(line, ">")
 		},
@@ -335,10 +351,10 @@ var htmlBlockConditions = []struct {
 	},
 	{
 		startCondition: func(line []byte) bool {
-			return hasBytePrefix(line, "<![CDATA[")
+			return hasBytePrefix(line, cdataPrefix)
 		},
 		endCondition: func(line []byte) bool {
-			return contains(line, "]]>")
+			return contains(line, cdataSuffix)
 		},
 		canInterruptParagraph: true,
 	},
@@ -390,6 +406,10 @@ var htmlBlockConditions = []struct {
 		endCondition:          isBlankLine,
 		canInterruptParagraph: false,
 	},
+}
+
+func hasHTMLDeclarationPrefix(b []byte) bool {
+	return hasBytePrefix(b, "<!") && len(b) >= 3 && isASCIILetter(b[2])
 }
 
 func hasCaseInsensitiveBytePrefix(b []byte, prefix string) bool {

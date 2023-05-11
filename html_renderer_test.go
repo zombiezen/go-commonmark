@@ -124,14 +124,11 @@ func TestHTMLRendererIgnoreRaw(t *testing.T) {
 }
 
 func TestHTMLRendererFilter(t *testing.T) {
-	t.Skip("Not implemented yet.")
-
 	tests := []struct {
-		name       string
-		input      string
-		filterTag  func(tag []byte) bool
-		skipFilter bool
-		want       string
+		name      string
+		input     string
+		filterTag func(tag []byte) bool
+		want      string
 	}{
 		{
 			name: "GFMExample/Default",
@@ -139,22 +136,22 @@ func TestHTMLRendererFilter(t *testing.T) {
 				"<blockquote>\n" +
 				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
 				"</blockquote>\n",
-			want: "<p><strong> &lt;title> &lt;style> <em></p>\n" +
-				"<blockquote>\n" +
-				"  &lt;xmp> is disallowed.  &lt;XMP> is also disallowed.\n" +
-				"</blockquote>",
-		},
-		{
-			name: "GFMExample/SkipFilter",
-			input: "<strong> <title> <style> <em>\n\n" +
-				"<blockquote>\n" +
-				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
-				"</blockquote>\n",
-			skipFilter: true,
 			want: "<p><strong> <title> <style> <em></p>\n" +
 				"<blockquote>\n" +
 				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
 				"</blockquote>\n",
+		},
+		{
+			name: "GFMExample/GFM",
+			input: "<strong> <title> <style> <em>\n\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+			filterTag: FilterTagGFM,
+			want: "<p><strong> &lt;title> &lt;style> <em></p>\n" +
+				"<blockquote>\n" +
+				"  &lt;xmp> is disallowed.  &lt;XMP> is also disallowed.\n" +
+				"</blockquote>",
 		},
 		{
 			name: "GFMExample/AllowAll",
@@ -187,7 +184,6 @@ func TestHTMLRendererFilter(t *testing.T) {
 			r := &HTMLRenderer{
 				ReferenceMap: refMap,
 				FilterTag:    test.filterTag,
-				SkipFilter:   test.skipFilter,
 			}
 			buf := new(bytes.Buffer)
 			if err := r.Render(buf, blocks); err != nil {
