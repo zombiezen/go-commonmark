@@ -25,14 +25,61 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/net/html/atom"
 )
 
 // An HTMLRenderer converts fully parsed CommonMark blocks into HTML.
+//
+// # Security considerations
+//
+// CommonMark permits the use of [raw HTML], which can introduce
+// [Cross-Site Scripting (XSS)] vulnerabilities and [HTML parse errors]
+// when used with untrusted inputs.
+// There are a few options to mitigate this risk:
+//
+//   - The resulting HTML can be sent through an HTML sanitizer.
+//     This is highly recommended.
+//   - Set IgnoreRaw to prevent inclusion of raw HTML.
+//     This eliminates any raw HTML usage,
+//     so the output is guaranteed to use a fixed set of elements
+//     and avoid parse errors.
+//     However, this can lead to content being omitted from the document entirely,
+//     which may be surprising to end-users for legitimate use cases.
+//   - FilterTag can be used to prevent some tags from being used
+//     while still showing the source text.
+//     The default FilterTag prevents common undesirable tags from being used.
+//     Note that this does not prevent parse errors.
+//     For untrusted inputs, this technique should be combined with sanitization.
+//
+// [Cross-Site Scripting (XSS)]: https://owasp.org/www-community/attacks/xss/
+// [HTML parse errors]: https://html.spec.whatwg.org/multipage/parsing.html#parse-errors
+// [raw HTML]: https://spec.commonmark.org/0.30/#raw-html
 type HTMLRenderer struct {
 	// ReferenceMap holds the document's link reference definitions.
 	ReferenceMap ReferenceMap
 	// SoftBreakBehavior determines how soft line breaks are rendered.
 	SoftBreakBehavior SoftBreakBehavior
+	// If IgnoreRaw is true, the renderer skips any HTML blocks or raw HTML.
+	IgnoreRaw bool
+	// FilterTag is a predicate function
+	// that reports whether an element with the given lowercased tag name
+	// should have its leading angle bracket escaped.
+	// If FilterTag is nil, then a filter
+	// equivalent to the GitHub Flavored Markdown [tagfilter extension]
+	// will be used.
+	// It has no effect if IgnoreRaw is true.
+	//
+	// FilterTag functions must not modify the byte slice
+	// nor retain the slice after the function returns.
+	//
+	// [tagfilter extension]: https://github.github.com/gfm/#disallowed-raw-html-extension-
+	FilterTag func(tag []byte) bool
+	// If SkipFilter is true, FilterTag will not be consulted
+	// and any raw HTML is passed through verbatim.
+	// This avoids the performance penalty of tokenizing the raw HTML.
+	// It has no effect if IgnoreRaw is true.
+	SkipFilter bool
 }
 
 // RenderHTML writes the given sequence of parsed blocks
@@ -64,129 +111,144 @@ func (r *HTMLRenderer) Render(w io.Writer, blocks []*RootBlock) error {
 // AppendBlock appends the rendered HTML of a fully parsed block to dst
 // and returns the resulting byte slice.
 func (r *HTMLRenderer) AppendBlock(dst []byte, block *RootBlock) []byte {
-	return r.appendBlock(dst, block.Source, &block.Block)
+	state := &renderState{
+		HTMLRenderer: r,
+		dst:          dst,
+	}
+	state.block(block.Source, &block.Block)
+	return state.dst
 }
 
-func (r *HTMLRenderer) appendBlock(dst []byte, source []byte, block *Block) []byte {
+type renderState struct {
+	*HTMLRenderer
+	dst []byte
+}
+
+func (r *renderState) block(source []byte, block *Block) {
 	switch block.Kind() {
 	case ParagraphKind:
-		dst = append(dst, "<p>"...)
-		dst = r.appendChildrenHTML(dst, source, block, false)
-		dst = append(dst, "</p>"...)
+		r.dst = append(r.dst, "<p>"...)
+		r.children(source, block, false)
+		r.dst = append(r.dst, "</p>"...)
 	case ThematicBreakKind:
-		dst = append(dst, "<hr>"...)
+		r.dst = append(r.dst, "<hr>"...)
 	case ATXHeadingKind, SetextHeadingKind:
 		level := block.HeadingLevel()
-		dst = append(dst, "<h"...)
-		dst = strconv.AppendInt(dst, int64(level), 10)
-		dst = append(dst, ">"...)
-		dst = r.appendChildrenHTML(dst, source, block, false)
-		dst = append(dst, "</h"...)
-		dst = strconv.AppendInt(dst, int64(level), 10)
-		dst = append(dst, ">"...)
+		r.dst = append(r.dst, "<h"...)
+		r.dst = strconv.AppendInt(r.dst, int64(level), 10)
+		r.dst = append(r.dst, ">"...)
+		r.children(source, block, false)
+		r.dst = append(r.dst, "</h"...)
+		r.dst = strconv.AppendInt(r.dst, int64(level), 10)
+		r.dst = append(r.dst, ">"...)
 	case IndentedCodeBlockKind, FencedCodeBlockKind:
-		dst = append(dst, "<pre><code"...)
+		r.dst = append(r.dst, "<pre><code"...)
 		if info := block.InfoString(); info != nil {
 			words := strings.Fields(info.Text(source))
 			if len(words) > 0 {
-				dst = append(dst, ` class="language-`...)
-				dst = append(dst, html.EscapeString(words[0])...)
-				dst = append(dst, `"`...)
+				r.dst = append(r.dst, ` class="language-`...)
+				r.dst = append(r.dst, html.EscapeString(words[0])...)
+				r.dst = append(r.dst, `"`...)
 			}
 		}
-		dst = append(dst, ">"...)
-		dst = r.appendChildrenHTML(dst, source, block, false)
-		dst = append(dst, "</code></pre>"...)
+		r.dst = append(r.dst, ">"...)
+		r.children(source, block, false)
+		r.dst = append(r.dst, "</code></pre>"...)
 	case BlockQuoteKind:
-		dst = append(dst, "<blockquote>"...)
-		dst = r.appendChildrenHTML(dst, source, block, false)
-		dst = append(dst, "</blockquote>"...)
+		r.dst = append(r.dst, "<blockquote>"...)
+		r.children(source, block, false)
+		r.dst = append(r.dst, "</blockquote>"...)
 	case ListKind:
 		if block.IsOrderedList() {
-			dst = append(dst, "<ol"...)
+			r.dst = append(r.dst, "<ol"...)
 			if n := block.firstChild().Block().ListItemNumber(source); n >= 0 && n != 1 {
-				dst = append(dst, ` start="`...)
-				dst = strconv.AppendInt(dst, int64(n), 10)
-				dst = append(dst, `"`...)
+				r.dst = append(r.dst, ` start="`...)
+				r.dst = strconv.AppendInt(r.dst, int64(n), 10)
+				r.dst = append(r.dst, `"`...)
 			}
-			dst = append(dst, ">"...)
+			r.dst = append(r.dst, ">"...)
 		} else {
-			dst = append(dst, "<ul>"...)
+			r.dst = append(r.dst, "<ul>"...)
 		}
-		dst = r.appendChildrenHTML(dst, source, block, false)
+		r.children(source, block, false)
 		if block.IsOrderedList() {
-			dst = append(dst, "</ol>"...)
+			r.dst = append(r.dst, "</ol>"...)
 		} else {
-			dst = append(dst, "</ul>"...)
+			r.dst = append(r.dst, "</ul>"...)
 		}
 	case ListItemKind:
-		dst = append(dst, "<li>"...)
-		dst = r.appendChildrenHTML(dst, source, block, block.IsTightList())
-		dst = append(dst, "</li>"...)
+		r.dst = append(r.dst, "<li>"...)
+		r.children(source, block, block.IsTightList())
+		r.dst = append(r.dst, "</li>"...)
 	case HTMLBlockKind:
-		dst = r.appendChildrenHTML(dst, source, block, false)
+		if !r.IgnoreRaw {
+			r.children(source, block, false)
+		}
 	}
-	return dst
 }
 
-func (r *HTMLRenderer) appendChildrenHTML(dst []byte, source []byte, parent *Block, tight bool) []byte {
+func (r *renderState) children(source []byte, parent *Block, tight bool) {
 	switch {
 	case parent != nil && len(parent.inlineChildren) > 0:
 		for _, c := range parent.inlineChildren {
-			dst = r.appendInlineHTML(dst, source, c)
+			r.inline(source, c)
 		}
 	case parent != nil && len(parent.blockChildren) > 0:
 		for _, c := range parent.blockChildren {
 			if tight && c.Kind() == ParagraphKind {
-				dst = r.appendChildrenHTML(dst, source, c, false)
+				r.children(source, c, false)
 			} else {
-				dst = r.appendBlock(dst, source, c)
+				r.block(source, c)
 			}
 		}
 	}
-	return dst
 }
 
-func (r *HTMLRenderer) appendInlineHTML(dst []byte, source []byte, inline *Inline) []byte {
+func (r *renderState) inline(source []byte, inline *Inline) {
 	const hardLineBreak = "<br>\n"
 	switch inline.Kind() {
 	case TextKind, UnparsedKind:
-		dst = escapeHTML(dst, spanSlice(source, inline.Span()))
-	case CharacterReferenceKind, RawHTMLKind:
-		dst = append(dst, spanSlice(source, inline.Span())...)
+		r.dst = escapeHTML(r.dst, spanSlice(source, inline.Span()))
+	case CharacterReferenceKind:
+		r.dst = append(r.dst, spanSlice(source, inline.Span())...)
+	case RawHTMLKind:
+		if !r.IgnoreRaw {
+			// TODO(now): Filter if !r.SkipFilter
+			r.dst = append(r.dst, spanSlice(source, inline.Span())...)
+		}
 	case SoftLineBreakKind:
 		switch r.SoftBreakBehavior {
 		case SoftBreakHarden:
-			dst = append(dst, hardLineBreak...)
+			r.dst = append(r.dst, hardLineBreak...)
 		case SoftBreakSpace:
-			dst = append(dst, ' ')
+			r.dst = append(r.dst, ' ')
 		default:
 			if inline.Span().Len() > 0 {
-				dst = append(dst, spanSlice(source, inline.Span())...)
+				r.dst = append(r.dst, spanSlice(source, inline.Span())...)
 			} else {
-				dst = append(dst, '\n')
+				r.dst = append(r.dst, '\n')
 			}
 		}
 	case HardLineBreakKind:
-		dst = append(dst, hardLineBreak...)
+		r.dst = append(r.dst, hardLineBreak...)
 	case EmphasisKind:
-		dst = append(dst, "<em>"...)
+		r.dst = append(r.dst, "<em>"...)
 		for _, c := range inline.children {
-			dst = r.appendInlineHTML(dst, source, c)
+			r.inline(source, c)
 		}
-		dst = append(dst, "</em>"...)
+		r.dst = append(r.dst, "</em>"...)
 	case StrongKind:
-		dst = append(dst, "<strong>"...)
+		r.dst = append(r.dst, "<strong>"...)
 		for _, c := range inline.children {
-			dst = r.appendInlineHTML(dst, source, c)
+			r.inline(source, c)
 		}
-		dst = append(dst, "</strong>"...)
+		r.dst = append(r.dst, "</strong>"...)
 	case CodeSpanKind:
-		dst = append(dst, "<code>"...)
+		r.dst = append(r.dst, "<code>"...)
 		for _, c := range inline.children {
-			dst = r.appendInlineHTML(dst, source, c)
+			r.inline(source, c)
 		}
-		dst = append(dst, "</code>"...)
+		r.dst = append(r.dst, "</code>"...)
 	case LinkKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
@@ -199,19 +261,19 @@ func (r *HTMLRenderer) appendInlineHTML(dst []byte, source []byte, inline *Inlin
 				TitlePresent: title != nil,
 			}
 		}
-		dst = append(dst, `<a href="`...)
-		dst = append(dst, html.EscapeString(NormalizeURI(def.Destination))...)
-		dst = append(dst, `"`...)
+		r.dst = append(r.dst, `<a href="`...)
+		r.dst = append(r.dst, html.EscapeString(NormalizeURI(def.Destination))...)
+		r.dst = append(r.dst, `"`...)
 		if def.TitlePresent {
-			dst = append(dst, ` title="`...)
-			dst = append(dst, html.EscapeString(def.Title)...)
-			dst = append(dst, `"`...)
+			r.dst = append(r.dst, ` title="`...)
+			r.dst = append(r.dst, html.EscapeString(def.Title)...)
+			r.dst = append(r.dst, `"`...)
 		}
-		dst = append(dst, ">"...)
+		r.dst = append(r.dst, ">"...)
 		for _, c := range inline.children {
-			dst = r.appendInlineHTML(dst, source, c)
+			r.inline(source, c)
 		}
-		dst = append(dst, "</a>"...)
+		r.dst = append(r.dst, "</a>"...)
 	case ImageKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
@@ -224,36 +286,35 @@ func (r *HTMLRenderer) appendInlineHTML(dst []byte, source []byte, inline *Inlin
 				TitlePresent: title != nil,
 			}
 		}
-		dst = append(dst, `<img src="`...)
-		dst = append(dst, html.EscapeString(NormalizeURI(def.Destination))...)
-		dst = append(dst, `"`...)
+		r.dst = append(r.dst, `<img src="`...)
+		r.dst = append(r.dst, html.EscapeString(NormalizeURI(def.Destination))...)
+		r.dst = append(r.dst, `"`...)
 		if def.TitlePresent {
-			dst = append(dst, ` title="`...)
-			dst = append(dst, html.EscapeString(def.Title)...)
-			dst = append(dst, `"`...)
+			r.dst = append(r.dst, ` title="`...)
+			r.dst = append(r.dst, html.EscapeString(def.Title)...)
+			r.dst = append(r.dst, `"`...)
 		}
-		dst = appendAltText(dst, source, inline)
-		dst = append(dst, ">"...)
+		r.dst = appendAltText(r.dst, source, inline)
+		r.dst = append(r.dst, ">"...)
 	case AutolinkKind:
 		destination := inline.children[0].Text(source)
-		dst = append(dst, `<a href="`...)
+		r.dst = append(r.dst, `<a href="`...)
 		if IsEmailAddress(destination) {
-			dst = append(dst, "mailto:"...)
+			r.dst = append(r.dst, "mailto:"...)
 		}
-		dst = append(dst, html.EscapeString(NormalizeURI(destination))...)
-		dst = append(dst, `">`...)
-		dst = append(dst, html.EscapeString(destination)...)
-		dst = append(dst, "</a>"...)
+		r.dst = append(r.dst, html.EscapeString(NormalizeURI(destination))...)
+		r.dst = append(r.dst, `">`...)
+		r.dst = append(r.dst, html.EscapeString(destination)...)
+		r.dst = append(r.dst, "</a>"...)
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
-			dst = append(dst, ' ')
+			r.dst = append(r.dst, ' ')
 		}
 	case HTMLTagKind:
 		for _, c := range inline.children {
-			dst = r.appendInlineHTML(dst, source, c)
+			r.inline(source, c)
 		}
 	}
-	return dst
 }
 
 func appendAltText(dst []byte, source []byte, parent *Inline) []byte {
@@ -322,6 +383,29 @@ func escapeHTML(dst []byte, src []byte) []byte {
 		dst = append(dst, src[verbatimStart:]...)
 	}
 	return dst
+}
+
+func maybeLower(x []byte, buf *[]byte) []byte {
+	hasUpper := false
+	for _, b := range x {
+		if 'A' <= b && b <= 'Z' {
+			hasUpper = true
+			break
+		}
+	}
+	if !hasUpper {
+		return x
+	}
+
+	*buf = (*buf)[:0]
+	for _, b := range x {
+		if 'A' <= b && b <= 'Z' {
+			*buf = append(*buf, b-'A'+'a')
+		} else {
+			*buf = append(*buf, b)
+		}
+	}
+	return *buf
 }
 
 // SoftBreakBehavior is an enumeration of rendering styles for [soft line breaks].
@@ -810,67 +894,67 @@ var (
 	}
 
 	htmlBlockStarters6 = []string{
-		"address",
-		"article",
-		"aside",
-		"base",
-		"basefont",
-		"blockquote",
-		"body",
-		"caption",
-		"center",
-		"col",
-		"colgroup",
-		"dd",
-		"details",
-		"dialog",
-		"dir",
-		"div",
-		"dl",
-		"dt",
-		"fieldset",
-		"figcaption",
-		"figure",
-		"footer",
-		"form",
-		"frame",
-		"frameset",
-		"h1",
-		"h2",
-		"h3",
-		"h4",
-		"h5",
-		"h6",
-		"head",
-		"header",
-		"hr",
-		"html",
-		"iframe",
-		"legend",
-		"li",
-		"link",
-		"main",
-		"menu",
-		"menuitem",
-		"nav",
-		"noframes",
-		"ol",
-		"optgroup",
-		"option",
-		"p",
-		"param",
-		"section",
-		"source",
-		"summary",
-		"table",
-		"tbody",
-		"td",
-		"tfoot",
-		"th",
-		"thead",
-		"title",
-		"tr",
-		"track",
-		"ul",
+		atom.Address.String(),
+		atom.Article.String(),
+		atom.Aside.String(),
+		atom.Base.String(),
+		atom.Basefont.String(),
+		atom.Blockquote.String(),
+		atom.Body.String(),
+		atom.Caption.String(),
+		atom.Center.String(),
+		atom.Col.String(),
+		atom.Colgroup.String(),
+		atom.Dd.String(),
+		atom.Details.String(),
+		atom.Dialog.String(),
+		atom.Dir.String(),
+		atom.Div.String(),
+		atom.Dl.String(),
+		atom.Dt.String(),
+		atom.Fieldset.String(),
+		atom.Figcaption.String(),
+		atom.Figure.String(),
+		atom.Footer.String(),
+		atom.Form.String(),
+		atom.Frame.String(),
+		atom.Frameset.String(),
+		atom.H1.String(),
+		atom.H2.String(),
+		atom.H3.String(),
+		atom.H4.String(),
+		atom.H5.String(),
+		atom.H6.String(),
+		atom.Head.String(),
+		atom.Header.String(),
+		atom.Hr.String(),
+		atom.Html.String(),
+		atom.Iframe.String(),
+		atom.Legend.String(),
+		atom.Li.String(),
+		atom.Link.String(),
+		atom.Main.String(),
+		atom.Menu.String(),
+		atom.Menuitem.String(),
+		atom.Nav.String(),
+		atom.Noframes.String(),
+		atom.Ol.String(),
+		atom.Optgroup.String(),
+		atom.Option.String(),
+		atom.P.String(),
+		atom.Param.String(),
+		atom.Section.String(),
+		atom.Source.String(),
+		atom.Summary.String(),
+		atom.Table.String(),
+		atom.Tbody.String(),
+		atom.Td.String(),
+		atom.Tfoot.String(),
+		atom.Th.String(),
+		atom.Thead.String(),
+		atom.Title.String(),
+		atom.Tr.String(),
+		atom.Track.String(),
+		atom.Ul.String(),
 	}
 )

@@ -132,6 +132,130 @@ func TestSoftBreakBehavior(t *testing.T) {
 	}
 }
 
+func TestHTMLRendererIgnoreRaw(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "NoRaw",
+			input: "Hello World!",
+			want:  "<p>Hello World!</p>",
+		},
+		{
+			name:  "MarkdownStrong",
+			input: "Hello **World**!",
+			want:  "<p>Hello <strong>World</strong>!</p>",
+		},
+		{
+			name:  "HTMLStrong",
+			input: "Hello <strong>World</strong>!",
+			want:  "<p>Hello World!</p>",
+		},
+		{
+			name:  "HTMLBlock",
+			input: "<table>\n<tr><td>Hello</td></tr>\n</table>",
+			want:  "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			blocks, refMap := Parse([]byte(test.input))
+			r := &HTMLRenderer{
+				ReferenceMap: refMap,
+				IgnoreRaw:    true,
+			}
+			buf := new(bytes.Buffer)
+			if err := r.Render(buf, blocks); err != nil {
+				t.Error("Render:", err)
+			}
+			if got := buf.String(); got != test.want {
+				t.Errorf("output = %q; want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestHTMLRendererFilter(t *testing.T) {
+	t.Skip("Not implemented yet.")
+
+	tests := []struct {
+		name       string
+		input      string
+		filterTag  func(tag []byte) bool
+		skipFilter bool
+		want       string
+	}{
+		{
+			name: "GFMExample/Default",
+			input: "<strong> <title> <style> <em>\n\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+			want: "<p><strong> &lt;title> &lt;style> <em></p>\n" +
+				"<blockquote>\n" +
+				"  &lt;xmp> is disallowed.  &lt;XMP> is also disallowed.\n" +
+				"</blockquote>",
+		},
+		{
+			name: "GFMExample/SkipFilter",
+			input: "<strong> <title> <style> <em>\n\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+			skipFilter: true,
+			want: "<p><strong> <title> <style> <em></p>\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+		},
+		{
+			name: "GFMExample/AllowAll",
+			input: "<strong> <title> <style> <em>\n\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+			filterTag: func(tag []byte) bool { return false },
+			want: "<p><strong> <title> <style> <em></p>\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+		},
+		{
+			name: "GFMExample/BlockAll",
+			input: "<strong> <title> <style> <em>\n\n" +
+				"<blockquote>\n" +
+				"  <xmp> is disallowed.  <XMP> is also disallowed.\n" +
+				"</blockquote>\n",
+			filterTag: func(tag []byte) bool { return true },
+			want: "&lt;p>&lt;strong> &lt;title> &lt;style> &lt;em>&lt;/p>\n" +
+				"&lt;blockquote>\n" +
+				"  &lt;xmp> is disallowed.  &lt;XMP> is also disallowed.\n" +
+				"&lt;/blockquote>\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			blocks, refMap := Parse([]byte(test.input))
+			r := &HTMLRenderer{
+				ReferenceMap: refMap,
+				FilterTag:    test.filterTag,
+				SkipFilter:   test.skipFilter,
+			}
+			buf := new(bytes.Buffer)
+			if err := r.Render(buf, blocks); err != nil {
+				t.Error("Render:", err)
+			}
+			got := normalizeHTML(buf.Bytes())
+			want := normalizeHTML([]byte(test.want))
+			if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("-want +got:\n%s", diff)
+			}
+		})
+	}
+}
+
 func BenchmarkRenderHTML(b *testing.B) {
 	b.Run("Spec", func(b *testing.B) {
 		input := new(bytes.Buffer)
