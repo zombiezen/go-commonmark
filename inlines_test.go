@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"zombiezen.com/go/commonmark/internal/normhtml"
 )
 
 func TestNullReplacementInReference(t *testing.T) {
@@ -38,8 +39,8 @@ func TestNullReplacementInReference(t *testing.T) {
 	if err := RenderHTML(buf, blocks, refMap); err != nil {
 		t.Error("RenderHTML:", err)
 	}
-	got := string(normalizeHTML(buf.Bytes()))
-	want := string(normalizeHTML([]byte(wantHTML)))
+	got := string(normhtml.NormalizeHTML(buf.Bytes()))
+	want := string(normhtml.NormalizeHTML([]byte(wantHTML)))
 	if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("Input:\n%s\nOutput (-want +got):\n%s", input, diff)
 	}

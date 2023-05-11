@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning][].
 - HTML rendering can be customized with the new `HTMLRenderer` type.
   ([#2](https://github.com/zombiezen/go-commonmark/issues/2))
 
+### Changed
+
+- This package now depends on `golang.org/x/net/html/atom`.
 
 ### Fixed
 
