@@ -24,6 +24,7 @@ const (
 )
 
 // Node is a pointer to a [Block] or an [Inline].
+// Nodes can be compared for equality using the == operator.
 type Node struct {
 	ptr unsafe.Pointer
 	typ uint8
