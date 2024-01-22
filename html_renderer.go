@@ -105,7 +105,26 @@ func (r *HTMLRenderer) AppendBlock(dst []byte, block *RootBlock) []byte {
 		HTMLRenderer: r,
 		dst:          dst,
 	}
-	state.block(block.Source, &block.Block)
+	Walk(block.AsNode(), &WalkOptions{
+		Pre: func(c *Cursor) bool {
+			if b := c.Node().Block(); b != nil {
+				return state.preBlock(block.Source, c)
+			}
+			if i := c.Node().Inline(); i != nil {
+				return state.preInline(block.Source, i)
+			}
+			return true
+		},
+		Post: func(c *Cursor) bool {
+			if b := c.Node().Block(); b != nil {
+				return state.postBlock(block.Source, c)
+			}
+			if i := c.Node().Inline(); i != nil {
+				return state.postInline(block.Source, i)
+			}
+			return true
+		},
+	})
 	return state.dst
 }
 
@@ -144,14 +163,16 @@ func (r *renderState) closeTag(name atom.Atom) {
 	r.dst = append(r.dst, '>')
 }
 
-func (r *renderState) block(source []byte, block *Block) {
+func (r *renderState) preBlock(source []byte, cursor *Cursor) bool {
+	block := cursor.Node().Block()
 	switch block.Kind() {
 	case ParagraphKind:
-		r.openTag(atom.P)
-		r.children(source, block, false)
-		r.closeTag(atom.P)
+		if !cursor.Parent().Block().IsTightList() {
+			r.openTag(atom.P)
+		}
 	case ThematicBreakKind:
 		r.openTag(atom.Hr)
+		return false
 	case ATXHeadingKind, SetextHeadingKind:
 		var tagName atom.Atom
 		switch block.HeadingLevel() {
@@ -169,8 +190,6 @@ func (r *renderState) block(source []byte, block *Block) {
 			tagName = atom.H6
 		}
 		r.openTag(tagName)
-		r.children(source, block, false)
-		r.closeTag(tagName)
 	case IndentedCodeBlockKind, FencedCodeBlockKind:
 		r.openTag(atom.Pre)
 		r.openTagAttr(atom.Code)
@@ -183,13 +202,8 @@ func (r *renderState) block(source []byte, block *Block) {
 			}
 		}
 		r.dst = append(r.dst, ">"...)
-		r.children(source, block, false)
-		r.closeTag(atom.Code)
-		r.closeTag(atom.Pre)
 	case BlockQuoteKind:
 		r.openTag(atom.Blockquote)
-		r.children(source, block, false)
-		r.closeTag(atom.Blockquote)
 	case ListKind:
 		var tagName atom.Atom
 		if block.IsOrderedList() {
@@ -205,43 +219,70 @@ func (r *renderState) block(source []byte, block *Block) {
 			tagName = atom.Ul
 			r.openTag(tagName)
 		}
-		r.children(source, block, false)
-		r.closeTag(tagName)
 	case ListItemKind:
 		r.openTag(atom.Li)
-		r.children(source, block, block.IsTightList())
-		r.closeTag(atom.Li)
 	case HTMLBlockKind:
-		if !r.IgnoreRaw {
-			r.children(source, block, false)
+		if r.IgnoreRaw {
+			return false
 		}
+	default:
+		return false
 	}
+	return true
 }
 
-func (r *renderState) children(source []byte, parent *Block, tight bool) {
-	switch {
-	case parent != nil && len(parent.inlineChildren) > 0:
-		for _, c := range parent.inlineChildren {
-			r.inline(source, c)
+func (r *renderState) postBlock(source []byte, cursor *Cursor) bool {
+	block := cursor.Node().Block()
+	switch block.Kind() {
+	case ParagraphKind:
+		if !cursor.Parent().Block().IsTightList() {
+			r.closeTag(atom.P)
 		}
-	case parent != nil && len(parent.blockChildren) > 0:
-		for _, c := range parent.blockChildren {
-			if tight && c.Kind() == ParagraphKind {
-				r.children(source, c, false)
-			} else {
-				r.block(source, c)
-			}
+	case ATXHeadingKind, SetextHeadingKind:
+		var tagName atom.Atom
+		switch block.HeadingLevel() {
+		case 1:
+			tagName = atom.H1
+		case 2:
+			tagName = atom.H2
+		case 3:
+			tagName = atom.H3
+		case 4:
+			tagName = atom.H4
+		case 5:
+			tagName = atom.H5
+		default:
+			tagName = atom.H6
 		}
+		r.closeTag(tagName)
+	case IndentedCodeBlockKind, FencedCodeBlockKind:
+		r.closeTag(atom.Code)
+		r.closeTag(atom.Pre)
+	case BlockQuoteKind:
+		r.closeTag(atom.Blockquote)
+	case ListKind:
+		var tagName atom.Atom
+		if block.IsOrderedList() {
+			tagName = atom.Ol
+		} else {
+			tagName = atom.Ul
+		}
+		r.closeTag(tagName)
+	case ListItemKind:
+		r.closeTag(atom.Li)
 	}
+	return true
 }
 
-func (r *renderState) inline(source []byte, inline *Inline) {
+func (r *renderState) preInline(source []byte, inline *Inline) bool {
 	const hardLineBreak = "<br>\n"
 	switch inline.Kind() {
 	case TextKind, UnparsedKind:
 		r.dst = escapeHTML(r.dst, spanSlice(source, inline.Span()))
+		return false
 	case CharacterReferenceKind:
 		r.dst = append(r.dst, spanSlice(source, inline.Span())...)
+		return false
 	case RawHTMLKind:
 		if !r.IgnoreRaw {
 			if r.FilterTag == nil {
@@ -250,6 +291,7 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 				r.filterRaw(spanSlice(source, inline.Span()))
 			}
 		}
+		return false
 	case SoftLineBreakKind:
 		switch r.SoftBreakBehavior {
 		case SoftBreakHarden:
@@ -263,26 +305,16 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 				r.dst = append(r.dst, '\n')
 			}
 		}
+		return false
 	case HardLineBreakKind:
 		r.dst = append(r.dst, hardLineBreak...)
+		return false
 	case EmphasisKind:
 		r.openTag(atom.Em)
-		for _, c := range inline.children {
-			r.inline(source, c)
-		}
-		r.closeTag(atom.Em)
 	case StrongKind:
 		r.openTag(atom.Strong)
-		for _, c := range inline.children {
-			r.inline(source, c)
-		}
-		r.closeTag(atom.Strong)
 	case CodeSpanKind:
 		r.openTag(atom.Code)
-		for _, c := range inline.children {
-			r.inline(source, c)
-		}
-		r.closeTag(atom.Code)
 	case LinkKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
@@ -305,10 +337,6 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 			r.dst = append(r.dst, `"`...)
 		}
 		r.dst = append(r.dst, ">"...)
-		for _, c := range inline.children {
-			r.inline(source, c)
-		}
-		r.closeTag(atom.A)
 	case ImageKind:
 		var def LinkDefinition
 		if ref := inline.LinkReference(); ref != "" {
@@ -332,6 +360,7 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 		}
 		r.dst = appendAltText(r.dst, source, inline)
 		r.dst = append(r.dst, ">"...)
+		return false
 	case AutolinkKind:
 		destination := inline.children[0].Text(source)
 		r.openTagAttr(atom.A)
@@ -343,15 +372,32 @@ func (r *renderState) inline(source []byte, inline *Inline) {
 		r.dst = append(r.dst, `">`...)
 		r.dst = append(r.dst, html.EscapeString(destination)...)
 		r.closeTag(atom.A)
+		return false
 	case IndentKind:
 		for i, n := 0, inline.IndentWidth(); i < n; i++ {
 			r.dst = append(r.dst, ' ')
 		}
+		return false
 	case HTMLTagKind:
-		for _, c := range inline.children {
-			r.inline(source, c)
-		}
+		// Just descend into children.
+	default:
+		return false
 	}
+	return true
+}
+
+func (r *renderState) postInline(source []byte, inline *Inline) bool {
+	switch inline.Kind() {
+	case EmphasisKind:
+		r.closeTag(atom.Em)
+	case StrongKind:
+		r.closeTag(atom.Strong)
+	case CodeSpanKind:
+		r.closeTag(atom.Code)
+	case LinkKind:
+		r.closeTag(atom.A)
+	}
+	return true
 }
 
 // filterRaw performs the tag filtering

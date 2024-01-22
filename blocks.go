@@ -138,7 +138,7 @@ func (b *Block) IsOrderedList() bool {
 // IsTightList reports whether the block is
 // a tight list or a tight list item.
 func (b *Block) IsTightList() bool {
-	return b != nil && !b.listLoose
+	return b != nil && (b.kind == ListKind || b.kind == ListItemKind) && !b.listLoose
 }
 
 // ListItemNumber returns the number of a [ListItemKind] block

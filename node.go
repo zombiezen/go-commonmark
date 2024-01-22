@@ -59,6 +59,29 @@ func (n Node) Span() Span {
 	return NullSpan()
 }
 
+// ChildCount returns the number of children the node has.
+// Calling ChildCount on the zero value returns 0.
+func (n Node) ChildCount() int {
+	if b := n.Block(); b != nil {
+		return b.ChildCount()
+	}
+	if i := n.Inline(); i != nil {
+		return i.ChildCount()
+	}
+	return 0
+}
+
+// Child returns the i'th child of the node.
+func (n Node) Child(i int) Node {
+	if b := n.Block(); b != nil {
+		return b.Child(i)
+	}
+	if in := n.Inline(); in != nil {
+		return in.Child(i).AsNode()
+	}
+	panic("Child on nil Node")
+}
+
 // AsNode converts the inline node to a [Node] pointer.
 func (inline *Inline) AsNode() Node {
 	if inline == nil {
