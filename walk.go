@@ -21,6 +21,7 @@ type Cursor struct {
 	node   Node
 	parent Node
 	block  *Block
+	index  int
 }
 
 // Node returns the current [Node].
@@ -37,6 +38,13 @@ func (c *Cursor) Parent() Node {
 // ParentBlock returns the nearest [Block] ancestor of the current [Node].
 func (c *Cursor) ParentBlock() *Block {
 	return c.block
+}
+
+// Index returns the index >= 0 of the current [Node]
+// in the list of children that contains it,
+// or a value < 0 if the current [Node] does not have a parent.
+func (c *Cursor) Index() int {
+	return c.index
 }
 
 // WalkOptions is the set of parameters to [Walk].
@@ -58,10 +66,8 @@ type WalkOptions struct {
 // and calling [WalkOptions.Pre] and [WalkOptions.Post].
 func Walk(root Node, opts *WalkOptions) {
 	type walkFrame struct {
-		node   Node
-		parent Node
-		block  *Block
-		post   bool
+		Cursor
+		post bool
 	}
 
 	childCount := Node.ChildCount
@@ -73,16 +79,14 @@ func Walk(root Node, opts *WalkOptions) {
 		getChild = opts.Child
 	}
 
-	stack := []walkFrame{{node: root}}
+	stack := []walkFrame{{Cursor: Cursor{node: root, index: -1}}}
 	cursor := new(Cursor)
 	for len(stack) > 0 {
 		curr := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		if curr.post {
 			if opts.Post != nil {
-				cursor.node = curr.node
-				cursor.parent = curr.parent
-				cursor.block = curr.block
+				*cursor = curr.Cursor
 				if !opts.Post(cursor) {
 					break
 				}
@@ -91,9 +95,7 @@ func Walk(root Node, opts *WalkOptions) {
 		}
 
 		if opts.Pre != nil {
-			cursor.node = curr.node
-			cursor.parent = curr.parent
-			cursor.block = curr.block
+			*cursor = curr.Cursor
 			if !opts.Pre(cursor) {
 				continue
 			}
@@ -106,9 +108,12 @@ func Walk(root Node, opts *WalkOptions) {
 				currBlock = b
 			}
 			stack = append(stack, walkFrame{
-				parent: curr.node,
-				node:   getChild(curr.node, i),
-				block:  currBlock,
+				Cursor: Cursor{
+					parent: curr.node,
+					node:   getChild(curr.node, i),
+					block:  currBlock,
+					index:  i,
+				},
 			})
 		}
 	}
