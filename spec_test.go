@@ -18,11 +18,9 @@ package commonmark
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -30,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"zombiezen.com/go/commonmark/internal/normhtml"
+	"zombiezen.com/go/commonmark/internal/spec"
 )
 
 func TestSpec(t *testing.T) {
@@ -52,12 +51,8 @@ func TestSpec(t *testing.T) {
 func TestGFMSpec(t *testing.T) {
 	t.Skip("GitHub Flavored Markdown not supported")
 
-	data, err := os.ReadFile(filepath.Join("testdata", "spec-0.29.0.gfm.11.json"))
+	testsuite, err := spec.LoadGFM()
 	if err != nil {
-		t.Fatal(err)
-	}
-	var testsuite []specExample
-	if err := json.Unmarshal(data, &testsuite); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,22 +132,11 @@ func nixShellCommand(tb testing.TB, pkg string, programName string) []string {
 	}
 }
 
-type specExample struct {
-	Markdown string
-	HTML     string
-	Example  int
-	Section  string
-}
-
-func loadTestSuite(tb testing.TB) []specExample {
+func loadTestSuite(tb testing.TB) []spec.Example {
 	tb.Helper()
 
-	data, err := os.ReadFile(filepath.Join("testdata", "spec-0.30.json"))
+	testsuite, err := spec.Load()
 	if err != nil {
-		tb.Fatal(err)
-	}
-	var testsuite []specExample
-	if err := json.Unmarshal(data, &testsuite); err != nil {
 		tb.Fatal(err)
 	}
 	return testsuite
