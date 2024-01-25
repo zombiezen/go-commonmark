@@ -20,6 +20,7 @@ package commonmark
 type Cursor struct {
 	node   Node
 	parent Node
+	block  *Block
 }
 
 // Node returns the current [Node].
@@ -31,6 +32,11 @@ func (c *Cursor) Node() Node {
 // (as returned by [*Cursor.Node]).
 func (c *Cursor) Parent() Node {
 	return c.parent
+}
+
+// ParentBlock returns the nearest [Block] ancestor of the current [Node].
+func (c *Cursor) ParentBlock() *Block {
+	return c.block
 }
 
 // WalkOptions is the set of parameters to [Walk].
@@ -54,6 +60,7 @@ func Walk(root Node, opts *WalkOptions) {
 	type walkFrame struct {
 		node   Node
 		parent Node
+		block  *Block
 		post   bool
 	}
 
@@ -75,6 +82,7 @@ func Walk(root Node, opts *WalkOptions) {
 			if opts.Post != nil {
 				cursor.node = curr.node
 				cursor.parent = curr.parent
+				cursor.block = curr.block
 				if !opts.Post(cursor) {
 					break
 				}
@@ -85,6 +93,7 @@ func Walk(root Node, opts *WalkOptions) {
 		if opts.Pre != nil {
 			cursor.node = curr.node
 			cursor.parent = curr.parent
+			cursor.block = curr.block
 			if !opts.Pre(cursor) {
 				continue
 			}
@@ -92,9 +101,14 @@ func Walk(root Node, opts *WalkOptions) {
 		curr.post = true
 		stack = append(stack, curr)
 		for i := childCount(curr.node) - 1; i >= 0; i-- {
+			currBlock := curr.block
+			if b := curr.node.Block(); b != nil {
+				currBlock = b
+			}
 			stack = append(stack, walkFrame{
 				parent: curr.node,
 				node:   getChild(curr.node, i),
+				block:  currBlock,
 			})
 		}
 	}

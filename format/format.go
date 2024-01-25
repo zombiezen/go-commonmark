@@ -20,174 +20,170 @@ package format
 
 import (
 	"bytes"
-	"fmt"
 	"io"
+	"strings"
 
 	"zombiezen.com/go/commonmark"
 )
 
 // Format writes the given blocks as CommonMark to the given writer.
 func Format(w io.Writer, blocks []*commonmark.RootBlock) error {
-	type stackFrame struct {
-		*commonmark.Block
-		source []byte
-		indent int
-	}
-
-	stack := make([]stackFrame, 0, len(blocks))
-	for i := len(blocks) - 1; i >= 0; i-- {
-		stack = append(stack, stackFrame{
-			source: blocks[i].Source,
-			Block:  &blocks[i].Block,
-		})
-	}
-
 	ww := &errWriter{w: w}
-	var prevKind commonmark.BlockKind
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		switch k := curr.Kind(); k {
-		case commonmark.ParagraphKind:
-			if prevKind != 0 {
-				ww.WriteString("\n")
-			}
-			formatInlines(ww, curr.source, curr.indent, curr.Block)
-			prevKind = commonmark.ParagraphKind
-		case commonmark.ThematicBreakKind:
-			if prevKind == 0 {
-				// Disambiguate from front matter.
-				ww.WriteString("***\n\n")
-			} else {
-				ww.WriteString("\n---\n\n")
-			}
-			prevKind = commonmark.ThematicBreakKind
-		case commonmark.ListKind:
-			if prevKind != 0 && curr.IsTightList() {
-				// Individual list items won't contain a blank line,
-				// so add them beforehand.
-				ww.WriteString("\n")
-			}
-			for i := curr.ChildCount() - 1; i >= 0; i-- {
-				stack = append(stack, stackFrame{
-					Block:  curr.Child(i).Block(),
-					source: curr.source,
-					indent: curr.indent,
-				})
-			}
-		case commonmark.ListItemKind:
-			if prevKind != 0 && !curr.IsTightList() {
-				ww.WriteString("\n")
-			}
-			start := 0
-			extraIndent := 0
-			if marker := curr.Child(start).Block(); marker.Kind() == commonmark.ListMarkerKind {
-				start++
-				markerBytes := spanSlice(curr.source, marker.Span())
-				ww.Write(markerBytes)
-				ww.WriteString(" ")
-				extraIndent = len(markerBytes) + 1
-				prevKind = commonmark.ListItemKind
-			}
-			if curr.IsTightList() && curr.ChildCount()-start == 1 && curr.Child(start).Block().Kind() == commonmark.ParagraphKind {
-				content := spanSlice(curr.source, curr.Child(start).Span())
-				// TODO(now): get last byte written
-				formatInlines(ww, curr.source, curr.indent+extraIndent, curr.Child(start).Block())
-				if !bytes.HasSuffix(content, []byte("\n")) {
-					ww.WriteString("\n")
+	for _, root := range blocks {
+		indents := make(map[commonmark.Node]string)
+		commonmark.Walk(root.AsNode(), &commonmark.WalkOptions{
+			Pre: func(c *commonmark.Cursor) bool {
+				if b := c.Node().Block(); b != nil {
+					parentIndent := indents[c.Parent()]
+					newIndent, ok := preBlock(ww, root.Source, parentIndent, c)
+					indents[c.Node()] = parentIndent + newIndent
+					return ok
 				}
-				prevKind = commonmark.ListItemKind
-				continue
-			}
-			for i := curr.ChildCount() - 1; i >= start; i-- {
-				stack = append(stack, stackFrame{
-					source: curr.source,
-					Block:  curr.Child(i).Block(),
-					indent: curr.indent + extraIndent,
-				})
-			}
-		case commonmark.LinkReferenceDefinitionKind:
-			if prevKind != 0 {
-				ww.WriteString("\n")
-			}
-			ww.WriteString("[")
-			ww.WriteString(curr.Child(0).Inline().LinkReference())
-			ww.WriteString("]: ")
-			ww.WriteString(curr.Child(1).Inline().Text(curr.source))
-			if curr.ChildCount() > 2 {
-				ww.WriteString(` "`)
-				ww.WriteString(curr.Child(2).Inline().Text(curr.source))
-				ww.WriteString(`"`)
-			}
-			ww.WriteString("\n")
-		default:
-			return fmt.Errorf("format commonmark: unhandled block kind %v", k)
-		}
+				if i := c.Node().Inline(); i != nil {
+					return visitInline(ww, root.Source, indents[c.ParentBlock().AsNode()], c)
+				}
+				return false
+			},
+			Post: func(c *commonmark.Cursor) bool {
+				if c.Node().Block() != nil {
+					postBlock(ww, root.Source, c)
+				}
+				return true
+			},
+		})
 	}
 	return ww.err
 }
 
-func formatInlines(w *errWriter, source []byte, indent int, block *commonmark.Block) {
-	for i := 0; i < block.ChildCount(); i++ {
-		child := block.Child(i).Inline()
-		switch child.Kind() {
-		case commonmark.LinkKind:
-			w.WriteString("[")
-			for j := 0; j < child.ChildCount(); j++ {
-				linkChild := child.Child(j)
-				if k := linkChild.Kind(); k != commonmark.LinkDestinationKind && k != commonmark.LinkTitleKind && k != commonmark.LinkLabelKind {
-					w.Write(spanSlice(source, linkChild.Span()))
-				}
-			}
-			w.WriteString("]")
-			if ref := child.LinkReference(); ref != "" {
-				if isShortcutLinkOrImage(child) {
-					// Turn shortcut links into collapsed links.
-					w.WriteString("[]")
-				} else {
-					w.WriteString("[")
-					w.WriteString(ref)
-					w.WriteString("]")
-				}
-			} else {
-				dst := child.LinkDestination()
-				title := child.LinkTitle()
-				if dst != nil || title != nil {
-					w.WriteString("(")
-					if dst != nil {
-						w.WriteString(commonmark.NormalizeURI(dst.Text(source)))
-						if title != nil {
-							w.WriteString(" ")
-						}
-					}
-					if title != nil {
-						w.WriteString(`"`)
-						w.WriteString(title.Text(source))
-						w.WriteString(`"`)
-					}
-					w.WriteString(")")
-				}
-			}
-		default:
-			if child.Span().IsValid() {
-				indentedWrite(w, indent, spanSlice(source, child.Span()))
-			}
+func preBlock(w *errWriter, source []byte, indent string, cursor *commonmark.Cursor) (childrenIndent string, descend bool) {
+	curr := cursor.Node().Block()
+	switch k := curr.Kind(); k {
+	case commonmark.ParagraphKind:
+		if cursor.ParentBlock().IsTightList() {
+			return "", true
 		}
+		if w.hasWritten {
+			w.WriteString("\n")
+		}
+		return "", true
+	case commonmark.ThematicBreakKind:
+		if w.hasWritten {
+			w.WriteString("\n---\n\n")
+		} else {
+			// Disambiguate from front matter.
+			w.WriteString("***\n\n")
+		}
+		return "", true
+	case commonmark.ListKind:
+		if w.hasWritten && curr.IsTightList() {
+			// Individual list items won't contain a blank line,
+			// so add them beforehand.
+			w.WriteString("\n")
+		}
+		return "", true
+	case commonmark.ListItemKind:
+		if w.hasWritten && !curr.IsTightList() {
+			w.WriteString("\n")
+		}
+		start := 0
+		if marker := curr.Child(start).Block(); marker.Kind() == commonmark.ListMarkerKind {
+			start++
+			markerBytes := spanSlice(source, marker.Span())
+			w.Write(markerBytes)
+			w.WriteString(" ")
+			childrenIndent = strings.Repeat(" ", len(markerBytes)+1)
+		}
+		return childrenIndent, true
+	case commonmark.LinkReferenceDefinitionKind:
+		if w.hasWritten {
+			w.WriteString("\n")
+		}
+		w.WriteString("[")
+		w.WriteString(curr.Child(0).Inline().LinkReference())
+		w.WriteString("]: ")
+		w.WriteString(curr.Child(1).Inline().Text(source))
+		if curr.ChildCount() > 2 {
+			w.WriteString(` "`)
+			w.WriteString(curr.Child(2).Inline().Text(source))
+			w.WriteString(`"`)
+		}
+		w.WriteString("\n")
+		return "", false
+	default:
+		return "", false
 	}
-	w.WriteString("\n")
 }
 
-func indentedWrite(w *errWriter, indent int, p []byte) {
+func postBlock(w *errWriter, source []byte, cursor *commonmark.Cursor) {
+	b := cursor.Node().Block()
+	switch b.Kind() {
+	case commonmark.ParagraphKind:
+		if !cursor.ParentBlock().IsTightList() {
+			w.WriteString("\n")
+		}
+	case commonmark.ListItemKind:
+		w.WriteString("\n")
+	}
+}
+
+func visitInline(w *errWriter, source []byte, indent string, cursor *commonmark.Cursor) bool {
+	child := cursor.Node().Inline()
+	switch child.Kind() {
+	case commonmark.LinkKind:
+		w.WriteString("[")
+		for j := 0; j < child.ChildCount(); j++ {
+			linkChild := child.Child(j)
+			if k := linkChild.Kind(); k != commonmark.LinkDestinationKind && k != commonmark.LinkTitleKind && k != commonmark.LinkLabelKind {
+				w.Write(spanSlice(source, linkChild.Span()))
+			}
+		}
+		w.WriteString("]")
+		if ref := child.LinkReference(); ref != "" {
+			if isShortcutLinkOrImage(child) {
+				// Turn shortcut links into collapsed links.
+				w.WriteString("[]")
+			} else {
+				w.WriteString("[")
+				w.WriteString(ref)
+				w.WriteString("]")
+			}
+		} else {
+			dst := child.LinkDestination()
+			title := child.LinkTitle()
+			if dst != nil || title != nil {
+				w.WriteString("(")
+				if dst != nil {
+					w.WriteString(commonmark.NormalizeURI(dst.Text(source)))
+					if title != nil {
+						w.WriteString(" ")
+					}
+				}
+				if title != nil {
+					w.WriteString(`"`)
+					w.WriteString(title.Text(source))
+					w.WriteString(`"`)
+				}
+				w.WriteString(")")
+			}
+		}
+		return false
+	default:
+		if !child.Span().IsValid() {
+			return false
+		}
+		indentedWrite(w, indent, spanSlice(source, child.Span()))
+		return false
+	}
+}
+
+func indentedWrite(w *errWriter, indent string, p []byte) {
 	for {
 		i := bytes.IndexByte(p, '\n')
 		if i == -1 {
 			break
 		}
 		w.Write(p[:i+1])
-		for j := 0; j < indent; j++ {
-			w.WriteString(" ")
-		}
+		w.WriteString(indent)
 		p = p[i+1:]
 	}
 	w.Write(p)
@@ -210,8 +206,9 @@ func isShortcutLinkOrImage(inline *commonmark.Inline) bool {
 }
 
 type errWriter struct {
-	w   io.Writer
-	err error
+	w          io.Writer
+	hasWritten bool
+	err        error
 }
 
 func (w *errWriter) Write(p []byte) (n int, err error) {
@@ -219,6 +216,7 @@ func (w *errWriter) Write(p []byte) (n int, err error) {
 		return 0, w.err
 	}
 	n, w.err = w.w.Write(p)
+	w.hasWritten = w.hasWritten || n > 0
 	return n, w.err
 }
 
@@ -227,6 +225,7 @@ func (w *errWriter) WriteString(s string) (n int, err error) {
 		return 0, w.err
 	}
 	n, w.err = io.WriteString(w.w, s)
+	w.hasWritten = w.hasWritten || n > 0
 	return n, w.err
 }
 
