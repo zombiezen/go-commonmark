@@ -19,174 +19,259 @@
 package format
 
 import (
-	"bytes"
 	"io"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"zombiezen.com/go/commonmark"
 )
 
 // Format writes the given blocks as CommonMark to the given writer.
 func Format(w io.Writer, blocks []*commonmark.RootBlock) error {
-	ww := &errWriter{w: w}
-	for _, root := range blocks {
-		indents := make(map[commonmark.Node]string)
-		commonmark.Walk(root.AsNode(), &commonmark.WalkOptions{
-			Pre: func(c *commonmark.Cursor) bool {
-				if b := c.Node().Block(); b != nil {
-					parentIndent := indents[c.Parent()]
-					newIndent, ok := preBlock(ww, root.Source, parentIndent, c)
-					indents[c.Node()] = parentIndent + newIndent
-					return ok
+	fw := newFormatWriter(w)
+	var source []byte
+	commonmark.Walk(commonmark.Node{}, &commonmark.WalkOptions{
+		Pre: func(c *commonmark.Cursor) bool {
+			if b := c.Node().Block(); b != nil {
+				if c.ParentBlock() == nil {
+					for _, root := range blocks {
+						if b == &root.Block {
+							source = root.Source
+							break
+						}
+					}
 				}
-				if i := c.Node().Inline(); i != nil {
-					return visitInline(ww, root.Source, indents[c.ParentBlock().AsNode()], c)
+
+				newIndent, ok := preBlock(fw, source, c)
+				if ok {
+					fw.push(newIndent)
 				}
-				return false
-			},
-			Post: func(c *commonmark.Cursor) bool {
-				if c.Node().Block() != nil {
-					postBlock(ww, root.Source, c)
-				}
-				return true
-			},
-		})
-	}
-	return ww.err
+				return ok
+			}
+			if i := c.Node().Inline(); i != nil {
+				return visitInline(fw, source, c)
+			}
+			return c.Node() == commonmark.Node{}
+		},
+		Post: func(c *commonmark.Cursor) bool {
+			if c.Node().Block() != nil {
+				fw.pop()
+				postBlock(fw, source, c)
+			}
+			if c.Node().Inline() != nil {
+				postInline(fw, source, c)
+			}
+			return true
+		},
+		ChildCount: func(n commonmark.Node) int {
+			if n == (commonmark.Node{}) {
+				return len(blocks)
+			}
+			return n.ChildCount()
+		},
+		Child: func(n commonmark.Node, i int) commonmark.Node {
+			if n == (commonmark.Node{}) {
+				return blocks[i].AsNode()
+			}
+			return n.Child(i)
+		},
+	})
+	return fw.err
 }
 
-func preBlock(w *errWriter, source []byte, indent string, cursor *commonmark.Cursor) (childrenIndent string, descend bool) {
+func preBlock(fw *formatWriter, source []byte, cursor *commonmark.Cursor) (childrenIndent string, descend bool) {
 	curr := cursor.Node().Block()
 	switch k := curr.Kind(); k {
 	case commonmark.ParagraphKind:
-		if cursor.ParentBlock().IsTightList() {
-			return "", true
-		}
-		if w.hasWritten {
-			w.WriteString("\n")
+		if !isFirstParagraph(cursor) {
+			fw.s("\n")
 		}
 		return "", true
 	case commonmark.ThematicBreakKind:
-		if w.hasWritten {
-			w.WriteString("\n---\n\n")
+		if fw.hasWritten {
+			fw.s("\n---\n\n")
 		} else {
 			// Disambiguate from front matter.
-			w.WriteString("***\n\n")
+			fw.s("***\n\n")
 		}
 		return "", true
 	case commonmark.ListKind:
-		if w.hasWritten && curr.IsTightList() {
+		if fw.hasWritten && curr.IsTightList() {
 			// Individual list items won't contain a blank line,
 			// so add them beforehand.
-			w.WriteString("\n")
+			fw.s("\n")
 		}
 		return "", true
 	case commonmark.ListItemKind:
-		if w.hasWritten && !curr.IsTightList() {
-			w.WriteString("\n")
+		if cursor.Index() > 0 && !curr.IsTightList() {
+			fw.s("\n")
 		}
 		start := 0
 		if marker := curr.Child(start).Block(); marker.Kind() == commonmark.ListMarkerKind {
 			start++
 			markerBytes := spanSlice(source, marker.Span())
-			w.Write(markerBytes)
-			w.WriteString(" ")
+			fw.b(markerBytes)
+			fw.s(" ")
 			childrenIndent = strings.Repeat(" ", len(markerBytes)+1)
 		}
 		return childrenIndent, true
 	case commonmark.LinkReferenceDefinitionKind:
-		if w.hasWritten {
-			w.WriteString("\n")
+		if fw.hasWritten {
+			fw.s("\n")
 		}
-		w.WriteString("[")
-		w.WriteString(curr.Child(0).Inline().LinkReference())
-		w.WriteString("]: ")
-		w.WriteString(curr.Child(1).Inline().Text(source))
+		fw.s("[")
+		fw.s(curr.Child(0).Inline().LinkReference())
+		fw.s("]: ")
+		fw.s(curr.Child(1).Inline().Text(source))
 		if curr.ChildCount() > 2 {
-			w.WriteString(` "`)
-			w.WriteString(curr.Child(2).Inline().Text(source))
-			w.WriteString(`"`)
+			fw.s(` "`)
+			fw.s(curr.Child(2).Inline().Text(source))
+			fw.s(`"`)
 		}
-		w.WriteString("\n")
+		fw.s("\n")
 		return "", false
+	case commonmark.BlockQuoteKind:
+		if fw.hasWritten {
+			fw.s("\n")
+		}
+		fw.s("> ")
+		return "> ", true
+	case commonmark.IndentedCodeBlockKind:
+		if fw.hasWritten {
+			fw.s("\n")
+		}
+		fw.s("```\n")
+		return "", true
+	case commonmark.FencedCodeBlockKind:
+		if fw.hasWritten {
+			fw.s("\n")
+		}
+		fw.s("```")
+		if info := curr.InfoString(); info != nil {
+			fw.b(spanSlice(source, info.Span()))
+		}
+		fw.s("\n")
+		return "", true
+	case commonmark.ATXHeadingKind:
+		if fw.hasWritten {
+			fw.s("\n")
+		}
+		for i, n := 0, curr.HeadingLevel(); i < n; i++ {
+			fw.s("#")
+		}
+		fw.s(" ")
+		return "", true
+	case commonmark.SetextHeadingKind:
+		if fw.hasWritten {
+			fw.s("\n")
+		}
+		return "", true
 	default:
 		return "", false
 	}
 }
 
-func postBlock(w *errWriter, source []byte, cursor *commonmark.Cursor) {
+func isFirstParagraph(cursor *commonmark.Cursor) bool {
+	if cursor.Node().Block().Kind() != commonmark.ParagraphKind {
+		return false
+	}
+	if cursor.Index() <= 0 {
+		return true
+	}
+	parent := cursor.Parent().Block()
+	if cursor.Index() == 1 && parent.Kind() == commonmark.ListItemKind && parent.Child(0).Block().Kind() == commonmark.ListMarkerKind {
+		return true
+	}
+	return false
+}
+
+func postBlock(fw *formatWriter, source []byte, cursor *commonmark.Cursor) {
 	b := cursor.Node().Block()
 	switch b.Kind() {
 	case commonmark.ParagraphKind:
 		if !cursor.ParentBlock().IsTightList() {
-			w.WriteString("\n")
+			fw.s("\n")
 		}
 	case commonmark.ListItemKind:
-		w.WriteString("\n")
+		fw.s("\n")
+	case commonmark.IndentedCodeBlockKind, commonmark.FencedCodeBlockKind:
+		fw.s("```\n")
+	case commonmark.ATXHeadingKind:
+		fw.s("\n")
+	case commonmark.SetextHeadingKind:
+		// TODO(someday): Extend to the length of the source.
+		if b.HeadingLevel() == 1 {
+			fw.s("\n=====\n")
+		} else {
+			fw.s("\n-----\n")
+		}
 	}
 }
 
-func visitInline(w *errWriter, source []byte, indent string, cursor *commonmark.Cursor) bool {
+func visitInline(fw *formatWriter, source []byte, cursor *commonmark.Cursor) bool {
 	child := cursor.Node().Inline()
 	switch child.Kind() {
 	case commonmark.LinkKind:
-		w.WriteString("[")
-		for j := 0; j < child.ChildCount(); j++ {
-			linkChild := child.Child(j)
-			if k := linkChild.Kind(); k != commonmark.LinkDestinationKind && k != commonmark.LinkTitleKind && k != commonmark.LinkLabelKind {
-				w.Write(spanSlice(source, linkChild.Span()))
-			}
+		fw.s("[")
+		return true
+	case commonmark.TextKind:
+		if cursor.ParentBlock().Kind().IsCode() {
+			fw.b(spanSlice(source, child.Span()))
+			return false
 		}
-		w.WriteString("]")
-		if ref := child.LinkReference(); ref != "" {
-			if isShortcutLinkOrImage(child) {
-				// Turn shortcut links into collapsed links.
-				w.WriteString("[]")
-			} else {
-				w.WriteString("[")
-				w.WriteString(ref)
-				w.WriteString("]")
+
+		for s := spanSlice(source, child.Span()); len(s) > 0; {
+			r, n := utf8.DecodeRune(s)
+			if strings.ContainsRune(`\[]*_<&`+"`", r) {
+				fw.s(`\`)
 			}
-		} else {
-			dst := child.LinkDestination()
-			title := child.LinkTitle()
-			if dst != nil || title != nil {
-				w.WriteString("(")
-				if dst != nil {
-					w.WriteString(commonmark.NormalizeURI(dst.Text(source)))
-					if title != nil {
-						w.WriteString(" ")
-					}
-				}
-				if title != nil {
-					w.WriteString(`"`)
-					w.WriteString(title.Text(source))
-					w.WriteString(`"`)
-				}
-				w.WriteString(")")
-			}
+			fw.b(s[:n])
+			s = s[n:]
 		}
+		return false
+	case commonmark.InfoStringKind, commonmark.LinkDestinationKind, commonmark.LinkLabelKind, commonmark.LinkTitleKind:
 		return false
 	default:
 		if !child.Span().IsValid() {
 			return false
 		}
-		indentedWrite(w, indent, spanSlice(source, child.Span()))
+		fw.b(spanSlice(source, child.Span()))
 		return false
 	}
 }
 
-func indentedWrite(w *errWriter, indent string, p []byte) {
-	for {
-		i := bytes.IndexByte(p, '\n')
-		if i == -1 {
-			break
+func postInline(fw *formatWriter, source []byte, cursor *commonmark.Cursor) {
+	child := cursor.Node().Inline()
+	switch child.Kind() {
+	case commonmark.LinkKind:
+		fw.s("]")
+		if ref := child.LinkReference(); ref != "" {
+			if isShortcutLinkOrImage(child) {
+				// Turn shortcut links into collapsed links.
+				fw.s("[]")
+			} else {
+				fw.s("[")
+				fw.s(ref)
+				fw.s("]")
+			}
+		} else {
+			fw.s("(")
+			title := child.LinkTitle()
+			if dst := child.LinkDestination(); dst != nil {
+				fw.s(commonmark.NormalizeURI(dst.Text(source)))
+				if title != nil {
+					fw.s(" ")
+				}
+			}
+			if title != nil {
+				fw.s(`"`)
+				fw.s(title.Text(source))
+				fw.s(`"`)
+			}
+			fw.s(")")
 		}
-		w.Write(p[:i+1])
-		w.WriteString(indent)
-		p = p[i+1:]
 	}
-	w.Write(p)
 }
 
 func isShortcutLinkOrImage(inline *commonmark.Inline) bool {
@@ -205,28 +290,129 @@ func isShortcutLinkOrImage(inline *commonmark.Inline) bool {
 	return true
 }
 
-type errWriter struct {
-	w          io.Writer
+type formatWriter struct {
+	w           stringWriter
+	indents     []string
+	startedLine bool
+
 	hasWritten bool
 	err        error
 }
 
-func (w *errWriter) Write(p []byte) (n int, err error) {
-	if w.err != nil {
-		return 0, w.err
+func newFormatWriter(w io.Writer) *formatWriter {
+	sw, ok := w.(stringWriter)
+	if !ok {
+		return &formatWriter{w: fallbackStringWriter{w}}
 	}
-	n, w.err = w.w.Write(p)
-	w.hasWritten = w.hasWritten || n > 0
-	return n, w.err
+	return &formatWriter{w: sw}
 }
 
-func (w *errWriter) WriteString(s string) (n int, err error) {
-	if w.err != nil {
-		return 0, w.err
+func (fw *formatWriter) push(indent string) {
+	fw.indents = append(fw.indents, indent)
+}
+
+func (fw *formatWriter) pop() {
+	fw.indents = fw.indents[:len(fw.indents)-1]
+}
+
+func (fw *formatWriter) b(p []byte) {
+	// TODO(soon): Reimplement to avoid allocations.
+	fw.s(string(p))
+}
+
+func (fw *formatWriter) s(s string) {
+	if fw.err != nil {
+		return
 	}
-	n, w.err = io.WriteString(w.w, s)
-	w.hasWritten = w.hasWritten || n > 0
-	return n, w.err
+
+	for {
+		i := strings.IndexByte(s, '\n')
+		if i == -1 {
+			break
+		}
+		fw.hasWritten = true
+		if !fw.startedLine {
+			if i == 0 {
+				// For blank lines: don't leave trailing whitespace.
+				if fw.err = writeTrimmedIndent(fw.w, fw.indents); fw.err != nil {
+					return
+				}
+				if _, fw.err = fw.w.WriteString("\n"); fw.err != nil {
+					return
+				}
+				s = s[1:]
+				continue
+			}
+
+			if fw.err = writeStrings(fw.w, fw.indents); fw.err != nil {
+				return
+			}
+		}
+
+		if _, fw.err = fw.w.WriteString(s[:i+1]); fw.err != nil {
+			return
+		}
+		fw.startedLine = false
+		s = s[i+1:]
+	}
+
+	if len(s) == 0 {
+		return
+	}
+	fw.hasWritten = true
+	if !fw.startedLine {
+		if fw.err = writeStrings(fw.w, fw.indents); fw.err != nil {
+			return
+		}
+	}
+	_, fw.err = fw.w.WriteString(s)
+	fw.startedLine = true
+}
+
+func writeStrings(w io.StringWriter, slice []string) error {
+	for _, s := range slice {
+		if _, err := w.WriteString(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeTrimmedIndent(w io.StringWriter, indents []string) error {
+	var lastLen int
+	for {
+		if len(indents) == 0 {
+			return nil
+		}
+		last := indents[len(indents)-1]
+		i := strings.LastIndexFunc(last, func(r rune) bool {
+			return !unicode.IsSpace(r)
+		})
+		if i >= 0 {
+			_, n := utf8.DecodeRuneInString(last[i:])
+			lastLen = i + n
+			break
+		}
+		indents = indents[:len(indents)-1]
+	}
+	if err := writeStrings(w, indents[:len(indents)-1]); err != nil {
+		return err
+	}
+	_, err := w.WriteString(indents[len(indents)-1][:lastLen])
+	return err
+}
+
+type stringWriter interface {
+	io.Writer
+	io.StringWriter
+}
+
+type fallbackStringWriter struct {
+	io.Writer
+}
+
+func (sw fallbackStringWriter) WriteString(s string) (n int, err error) {
+	return sw.Writer.Write([]byte(s))
 }
 
 func spanSlice(b []byte, span commonmark.Span) []byte {
