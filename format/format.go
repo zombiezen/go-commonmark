@@ -162,7 +162,7 @@ func preBlock(fw *formatWriter, source []byte, cursor *commonmark.Cursor) (child
 		}
 		fw.s(" ")
 		return "", true
-	case commonmark.SetextHeadingKind:
+	case commonmark.SetextHeadingKind, commonmark.HTMLBlockKind:
 		if fw.hasWritten {
 			fw.s("\n")
 		}
@@ -223,7 +223,11 @@ func visitInline(fw *formatWriter, source []byte, cursor *commonmark.Cursor) boo
 
 		for s := spanSlice(source, child.Span()); len(s) > 0; {
 			r, n := utf8.DecodeRune(s)
-			if strings.ContainsRune(`\[]*_<&`+"`", r) {
+			if r == '\n' && cursor.ParentBlock().Kind() == commonmark.SetextHeadingKind {
+				s = s[n:]
+				continue
+			}
+			if strings.ContainsRune(`\[]*_<&#`+"`", r) {
 				fw.s(`\`)
 			}
 			fw.b(s[:n])
@@ -412,7 +416,7 @@ type fallbackStringWriter struct {
 }
 
 func (sw fallbackStringWriter) WriteString(s string) (n int, err error) {
-	return sw.Writer.Write([]byte(s))
+	return sw.Write([]byte(s))
 }
 
 func spanSlice(b []byte, span commonmark.Span) []byte {
