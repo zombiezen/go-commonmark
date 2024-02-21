@@ -19,6 +19,7 @@
 package format
 
 import (
+	"bytes"
 	"io"
 	"strings"
 	"unicode"
@@ -141,13 +142,19 @@ func preBlock(fw *formatWriter, source []byte, cursor *commonmark.Cursor) (child
 		if fw.hasWritten {
 			fw.s("\n")
 		}
-		fw.s("```\n")
+		for i, n := 0, codeFenceLength(source, curr); i < n; i++ {
+			fw.s("`")
+		}
+		fw.s("\n")
 		return "", true
 	case commonmark.FencedCodeBlockKind:
 		if fw.hasWritten {
 			fw.s("\n")
 		}
-		fw.s("```")
+		c := [1]byte{codeFenceChar(source, curr)}
+		for i, n := 0, codeFenceLength(source, curr); i < n; i++ {
+			fw.b(c[:])
+		}
 		if info := curr.InfoString(); info != nil {
 			fw.b(spanSlice(source, info.Span()))
 		}
@@ -196,7 +203,11 @@ func postBlock(fw *formatWriter, source []byte, cursor *commonmark.Cursor) {
 	case commonmark.ListItemKind:
 		fw.s("\n")
 	case commonmark.IndentedCodeBlockKind, commonmark.FencedCodeBlockKind:
-		fw.s("```\n")
+		c := [1]byte{codeFenceChar(source, b)}
+		for i, n := 0, codeFenceLength(source, b); i < n; i++ {
+			fw.b(c[:])
+		}
+		fw.s("\n")
 	case commonmark.ATXHeadingKind:
 		fw.s("\n")
 	case commonmark.SetextHeadingKind:
@@ -227,7 +238,7 @@ func visitInline(fw *formatWriter, source []byte, cursor *commonmark.Cursor) boo
 				s = s[n:]
 				continue
 			}
-			if strings.ContainsRune(`\[]*_<&#`+"`", r) {
+			if strings.ContainsRune(`\[]*_-=<>&#~`+"`", r) {
 				fw.s(`\`)
 			}
 			fw.b(s[:n])
@@ -292,6 +303,72 @@ func isShortcutLinkOrImage(inline *commonmark.Inline) bool {
 		}
 	}
 	return true
+}
+
+const codeBlockIndentLimit = 4
+
+func codeFenceChar(source []byte, block *commonmark.Block) byte {
+	info := block.InfoString()
+	if info == nil {
+		return '`'
+	}
+	s := spanSlice(source, info.Span())
+	if bytes.ContainsRune(s, '`') {
+		return '~'
+	} else {
+		return '`'
+	}
+}
+
+func codeFenceLength(source []byte, block *commonmark.Block) int {
+	fence := codeFenceChar(source, block)
+	minFence := 3 - 1
+	state := -1 // -1 = start of line, 0 = not a fence-like line
+	indent := 0
+	for i, n := 0, block.ChildCount(); i < n; i++ {
+		inl := block.Child(i).Inline()
+		switch inl.Kind() {
+		case commonmark.TextKind:
+			s := spanSlice(source, inl.Span())
+			for _, c := range s {
+				switch c {
+				case ' ':
+					if state == -1 {
+						indent++
+						if indent >= codeBlockIndentLimit {
+							state = 0
+						}
+					}
+				case '\n':
+					if state > minFence {
+						minFence = state
+					}
+					state = -1
+				case fence:
+					if state < 0 {
+						state = 1
+					} else if state > 0 {
+						state++
+					}
+				default:
+					state = 0
+				}
+			}
+		case commonmark.SoftLineBreakKind, commonmark.HardLineBreakKind:
+			if state > minFence {
+				minFence = state
+			}
+			state = -1
+		case commonmark.IndentKind:
+			if state == -1 {
+				indent += inl.IndentWidth()
+				if indent >= codeBlockIndentLimit {
+					state = 0
+				}
+			}
+		}
+	}
+	return minFence + 1
 }
 
 type formatWriter struct {
